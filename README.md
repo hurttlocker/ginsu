@@ -56,11 +56,11 @@ Prompts are **queued per worker** — rapid or concurrent `send`s never clobber 
 |---|---|---|
 | `GINSU_MODEL` | `gpt-5.6-sol` | any model your Codex CLI has |
 | `GINSU_EFFORT` | `high` | `low·medium·high·xhigh·max` |
-| `GINSU_SANDBOX` | `bypass` | `bypass` (full access) · `write` (workspace‑write) · `read` (read‑only) |
+| `GINSU_SANDBOX` | `write` | `write` (workspace‑write) · `bypass` (full access) · `read` (read‑only) |
 | `GINSU_TERM` | `auto` | `iterm·terminal·tmux` |
 | `GINSU_TIMEOUT` | `900` | seconds a blocking `send` waits before giving up |
 
-⚠️ **`bypass` runs Codex with `--dangerously-bypass-approvals-and-sandbox`** (full access, no sandbox). Convenient on a machine and repo you trust; use `GINSU_SANDBOX=write` for a safer default and review with `ginsu diff` before you commit.
+Ginsu defaults to **`write`** (workspace-write): Codex can edit the repo but stays sandboxed. On a machine and repo you fully trust, `GINSU_SANDBOX=bypass` runs Codex with `--dangerously-bypass-approvals-and-sandbox` (full access, no sandbox) — faster and more capable, but⚠️ only where you trust it. Either way, review with `ginsu diff` before you commit.
 
 ## How it works
 

@@ -27,7 +27,7 @@ set -uo pipefail
 CODEX="${GINSU_CODEX:-$(command -v codex || echo "$HOME/.npm-global/bin/codex")}"
 MODEL="${GINSU_MODEL:-gpt-5.6-sol}"
 EFFORT="${GINSU_EFFORT:-high}"        # low|medium|high|xhigh|max (ultra = token footgun, never default)
-SANDBOX="${GINSU_SANDBOX:-bypass}"    # bypass (full access) | write (workspace-write) | read (read-only)
+SANDBOX="${GINSU_SANDBOX:-write}"     # write (workspace-write, default) | bypass (full access) | read (read-only)
 TERM_PREF="${GINSU_TERM:-auto}"       # auto | iterm | terminal | tmux
 ROOT="${GINSU_HOME:-$HOME/.ginsu}"
 TIMEOUT="${GINSU_TIMEOUT:-900}"       # seconds a blocking `send` waits before giving up
@@ -382,6 +382,6 @@ list)  for d in "$ROOT"/*/; do [ -d "$d" ] || continue; w="$(basename "$d")"; \
 stop)  worker="${1:?}"; d="$(w_dir "$worker")"; tt="$(cat "$d/tty" 2>/dev/null)"; \
         kill "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null && echo "stopped $worker" || echo "$worker not running"; \
         tmux kill-session -t "ginsu-$worker" 2>/dev/null || true; close_window "$tt";;
-version|-v|--version) echo "ginsu 1.3.0";;
+version|-v|--version) echo "ginsu 1.3.1";;
 *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//';;
 esac
