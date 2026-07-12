@@ -29,3 +29,20 @@ ginsu stop  <worker>                     # when finished
 - **Mind the sandbox.** Default `GINSU_SANDBOX=bypass` gives Codex full access — only for repos the user trusts. Prefer `write` + `ginsu apply` when unsure.
 - **It's the user's subscription.** Codex runs on their Codex/ChatGPT sub — heavy use draws down that quota. Right-size delegated work.
 - **Keep the user in the loop.** They're watching the window; narrate what you delegated and what came back.
+
+## Hacking on it (fixing Ginsu itself)
+
+Ginsu is your link to the Codex model — if it breaks mid-task, you can repair it and keep going. It's **one bash file** (`ginsu`) with a small embedded Python renderer (`write_renderer`). Read it top to bottom; it's short by design.
+
+- **Where it runs from:** whatever `command -v ginsu` points at (usually a symlink into `~/.local/bin` created by `install.sh`, targeting the repo's `ginsu`). Editing that file is live immediately — there's no build step.
+- **After any edit:** `bash -n ginsu` (syntax), then test on a throwaway repo before trusting it:
+  ```bash
+  cd /tmp && rm -rf gtest && mkdir gtest && cd gtest && git init -q
+  ginsu spawn t /tmp/gtest
+  ginsu send t "create ping.txt with the word ping, then reply done"   # watch the window
+  ginsu send t "what file did you just make?"   # proves resume/memory
+  ginsu diff t && ginsu stop t
+  ```
+- **Runtime state per worker** lives in `$GINSU_HOME/<worker>/` (default `~/.ginsu/<worker>/`): `inbox`, `turn`, `session.id`, `response.out`, `render.py`, and **`codex.err`** — Codex's own startup chatter (MCP/auth noise) is redirected there, *out* of the window. Read `codex.err` first when a turn misbehaves.
+- **Backbone facts that bite:** the loop uses `codex exec --json` (turn 1) and `codex exec resume <id>` (later turns). ⚠️ `codex exec resume` **rejects both `-C` and `--color`** (they're valid only on plain `exec`) — passing them makes every turn after the first silently no-op. The session id is read from the first `--json` event, `thread.started`. Codex **blocks reading piped stdin**, so every invocation ends with `</dev/null` (harmless in the TTY window, essential when driven headless).
+- **If a fix is worth keeping**, commit it in the repo and push — the CLI is meant to be extended.
