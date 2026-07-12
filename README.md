@@ -57,9 +57,9 @@ ginsu diff  dev                  # see what Codex changed
 
 ## How it works
 
-- Turn 1: `codex exec <sandbox> -m <model> -o <reply-file> -C <repo> "<prompt>"` — Codex works, the human-readable stream shows in the window (what you watch), the final message is written to a file (Claude's clean reply).
-- Later turns: `codex exec resume <session-id> …` — same session, so Codex keeps its memory. The session id is captured from Codex's own session files, filtered to the worker's repo.
-- `spawn` opens the window via AppleScript (Terminal/iTerm) or tmux. The worker loop watches an inbox file; `send` writes to it and blocks on a turn counter until Codex finishes.
+- Turn 1: `codex exec --json <sandbox> -m <model> -o <reply-file> -C <repo> "<prompt>"` — Codex emits a structured event stream, and Ginsu renders it into a clean window: reasoning, the commands it runs, the files it touches, and the reply — with a live spinner and a per-turn `elapsed · tokens` footer, instead of raw log spew. The final message is also written to a file (Claude's clean reply). Codex's own startup chatter goes to a log, not your window.
+- Later turns: `codex exec resume <session-id> …` — same session, so Codex keeps its memory. The session id comes straight from Codex's `thread.started` event — no scanning session files.
+- `spawn` opens the window via AppleScript (Terminal/iTerm) or tmux. The worker loop watches an inbox file; `send` writes to it and blocks on a turn counter until Codex finishes, then hands you back the reply.
 
 That's the whole trick. It's small on purpose — read `ginsu`, it's one file.
 

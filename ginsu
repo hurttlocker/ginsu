@@ -16,7 +16,9 @@
 #   ginsu tail  <worker>               turn count, session id, last reply
 #   ginsu list  |  ginsu status <worker>  |  ginsu stop <worker>
 #
-# Backbone: the official Codex CLI (`codex exec` + `codex exec resume`). Nothing else.
+# Backbone: the official Codex CLI (`codex exec --json` + `codex exec resume`).
+# The window renders Codex's event stream itself — reasoning, commands, file
+# edits, and the reply — so it stays clean and readable, not raw log spew.
 set -uo pipefail
 
 CODEX="${GINSU_CODEX:-$(command -v codex || echo "$HOME/.npm-global/bin/codex")}"
@@ -36,10 +38,133 @@ esac
 w_dir(){ echo "$ROOT/$1"; }
 die(){ echo "ginsu: $*" >&2; exit 1; }
 
+# The renderer: turns `codex exec --json` events into a clean, colored window.
+# Written to the worker dir once per spawn so ginsu stays a single portable file.
+write_renderer(){
+  cat > "$1" <<'PYEOF'
+import sys, json, time, select, os, shutil, textwrap, re
+
+sidfile = sys.argv[1] if len(sys.argv) > 1 else ""
+repo    = sys.argv[2] if len(sys.argv) > 2 else ""
+
+NOCOLOR = bool(os.environ.get("NO_COLOR"))
+def c(code): return "" if NOCOLOR else code
+RESET=c("\033[0m"); DIM=c("\033[2m"); B=c("\033[1m")
+BLUE=c("\033[38;5;39m"); CYAN=c("\033[38;5;44m"); GREEN=c("\033[38;5;42m")
+GREY=c("\033[38;5;245m"); DK=c("\033[38;5;240m"); LT=c("\033[38;5;250m")
+RED=c("\033[38;5;203m"); YEL=c("\033[38;5;179m")
+
+SPIN="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+start=time.time(); si=0; usage=None
+
+def width():
+    try: return shutil.get_terminal_size((80,24)).columns
+    except Exception: return 80
+
+def clearline():
+    sys.stdout.write("\r\033[K")
+
+def out(s=""):
+    clearline(); sys.stdout.write(s+"\n"); sys.stdout.flush()
+
+def wrap(text, indent="   "):
+    w=width(); lines=[]
+    for para in text.split("\n"):
+        if not para.strip(): lines.append(""); continue
+        for seg in textwrap.wrap(para, max(24, w-len(indent))):
+            lines.append(indent+seg)
+    return "\n".join(lines)
+
+def spin():
+    global si
+    el=int(time.time()-start)
+    sys.stdout.write("\r%s%s%s %sCodex working…%s %s%ds%s" %
+        (GREY, SPIN[si%len(SPIN)], RESET, DIM, RESET, DIM, el, RESET))
+    sys.stdout.flush(); si+=1
+
+def rel(p):
+    if repo and p.startswith(repo): p=p[len(repo):].lstrip("/")
+    return p
+
+def unwrap(cmd):
+    m=re.match(r"^(?:/[\w./-]+/)?(?:ba|z)?sh\s+-l?c\s+(['\"])(.*)\1\s*$", cmd.strip(), re.S)
+    return m.group(2).strip() if m else cmd.strip()
+
+def render(o):
+    global usage
+    t=o.get("type")
+    if t=="thread.started":
+        tid=o.get("thread_id")
+        if tid and sidfile:
+            cur=""
+            try: cur=open(sidfile).read().strip()
+            except Exception: pass
+            if not cur: open(sidfile,"w").write(tid)
+        return
+    if t=="turn.completed":
+        usage=o.get("usage"); return
+    if t!="item.completed": return
+    it=o.get("item",{}); k=it.get("type")
+
+    if k=="agent_message":
+        txt=(it.get("text") or "").rstrip()
+        if not txt: return
+        out(); out("%s%s❯ Codex%s" % (B,CYAN,RESET)); out("%s%s%s" % (LT,wrap(txt),RESET))
+    elif k=="reasoning":
+        txt=(it.get("text") or "").strip()
+        if txt: out("%s· %s%s" % (DIM, txt.split("\n")[0][:200], RESET))
+    elif k=="command_execution":
+        out("%s$ %s%s" % (GREEN, unwrap(it.get("command","")), RESET))
+        aout=(it.get("aggregated_output") or "").rstrip("\n")
+        if aout:
+            ls=aout.split("\n"); shown=ls[:18]
+            for L in shown: out("%s  %s%s" % (DIM, L[:width()-2], RESET))
+            if len(ls)>len(shown): out("%s  … (+%d lines)%s" % (DIM, len(ls)-len(shown), RESET))
+        ec=it.get("exit_code")
+        if ec not in (0,None): out("%s  exit %s%s" % (RED, ec, RESET))
+    elif k=="file_change":
+        for ch in it.get("changes",[]):
+            kind=ch.get("kind","?"); p=rel(ch.get("path",""))
+            sym={"add":"+","update":"~","delete":"-"}.get(kind,"±")
+            col={"add":GREEN,"update":YEL,"delete":RED}.get(kind,GREY)
+            out("%s%s %s%s %s(%s)%s" % (col,sym,p,RESET, DIM, kind, RESET))
+    elif k=="error":
+        msg=it.get("message","")
+        if msg.startswith("Skill descriptions were shortened"): return   # harmless startup notice
+        if msg.strip(): out("%s! %s%s" % (RED, msg.strip(), RESET))
+    else:
+        out("%s· %s%s" % (DIM, k, RESET))
+
+def footer():
+    clearline(); el=int(time.time()-start)
+    if usage:
+        def k(n): return "%.1fk"%(n/1000) if n>=1000 else str(n)
+        out("%s◇ %ds · in %s (%s cached) · out %s%s" % (DK, el,
+            k(usage.get("input_tokens",0)), k(usage.get("cached_input_tokens",0)),
+            k(usage.get("output_tokens",0)), RESET))
+    else:
+        out("%s◇ %ds%s" % (DK, el, RESET))
+
+while True:
+    r,_,_=select.select([sys.stdin],[],[],0.12)
+    if r:
+        line=sys.stdin.readline()
+        if not line: break
+        line=line.strip()
+        if not line: continue
+        try: o=json.loads(line)
+        except Exception: continue
+        render(o)
+    else:
+        spin()
+footer()
+PYEOF
+}
+
 # open the worker loop in a visible terminal, portably
 launch_window(){
   local worker="$1" repo="$2" pref="$TERM_PREF"
-  local cmd="clear; echo '● Ginsu worker: $worker  ($repo)'; exec '$SELF' _loop '$worker'"
+  local cmd="clear; exec '$SELF' _loop '$worker'"
   if [ "$pref" = auto ]; then
     if [ "$(uname)" = Darwin ]; then
       if [ "${TERM_PROGRAM:-}" = iTerm.app ] || osascript -e 'application "iTerm" is running' 2>/dev/null | grep -q true; then pref=iterm; else pref=terminal; fi
@@ -82,7 +207,8 @@ spawn)
   if [ -f "$d/pid" ] && kill -0 "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null; then
     echo "worker '$worker' already running (pid $(cat "$d/pid"))"; exit 0; fi
   [ -x "$CODEX" ] || command -v "$CODEX" >/dev/null || die "codex CLI not found ($CODEX) — install Codex first"
-  mkdir -p "$d"; rm -f "$d/inbox" "$d/session.id" "$d/response.out"; echo 0 > "$d/turn"; echo "$repo" > "$d/repo"
+  mkdir -p "$d"; rm -f "$d/inbox" "$d/session.id" "$d/response.out" "$d/codex.err"; echo 0 > "$d/turn"; echo "$repo" > "$d/repo"
+  write_renderer "$d/render.py"
   launch_window "$worker" "$repo"
   echo "spawned worker '$worker' → $repo   ($MODEL, effort $EFFORT, sandbox $SANDBOX)"
   echo "  ginsu send $worker \"do X\"   |   ginsu diff $worker"
@@ -93,23 +219,39 @@ _loop)  # internal: the worker loop, runs inside the visible terminal
   cd "$repo" || exit 1
   trap 'rm -f "$d/pid"' EXIT
   echo $$ > "$d/pid"
-  echo "waiting for prompts…  ($MODEL · effort $EFFORT · sandbox $SANDBOX)"; echo
+  [ -f "$d/render.py" ] || write_renderer "$d/render.py"
+  PY="$(command -v python3 || true)"
+  cols=$(tput cols 2>/dev/null || echo 80)
+  rule=$(printf '─%.0s' $(seq 1 "$cols"))
+  printf '\033[1;38;5;208m  ▟▛ ginsu\033[0m  \033[1mworker:\033[0m %s\n' "$worker"
+  printf '  \033[2mrepo\033[0m   %s\n' "$repo"
+  printf '  \033[2mmodel\033[0m  %s \033[2m·\033[0m effort %s \033[2m·\033[0m sandbox %s\n' "$MODEL" "$EFFORT" "$SANDBOX"
+  printf '\033[38;5;240m%s\033[0m\n' "$rule"
+  printf '\033[2m  waiting for prompts…\033[0m\n'
   while true; do
-    while [ ! -f "$d/inbox" ]; do sleep 0.4; done
+    while [ ! -f "$d/inbox" ]; do sleep 0.2; done
     prompt="$(cat "$d/inbox")"; rm -f "$d/inbox"
-    printf '\n\033[1;34m▸ Claude:\033[0m %s\n\n' "$prompt"
-    base=("${SBX[@]}" -m "$MODEL" -c "model_reasoning_effort=\"$EFFORT\"" -o "$d/response.out")
-    if [ -s "$d/session.id" ]; then
-      "$CODEX" exec resume "${base[@]}" "$(cat "$d/session.id")" "$prompt"
+    cols=$(tput cols 2>/dev/null || echo 80); rule=$(printf '─%.0s' $(seq 1 "$cols"))
+    n="$(cat "$d/turn" 2>/dev/null || echo 0)"
+    printf '\n\033[38;5;240m%s\033[0m\n' "$rule"
+    printf '\033[1;38;5;39m▸ Claude\033[0m \033[2m· turn %s\033[0m\n' "$((n+1))"
+    printf '\033[38;5;250m%s\033[0m\n\n' "$prompt"
+    base=("${SBX[@]}" -m "$MODEL" -c "model_reasoning_effort=\"$EFFORT\"" --json -o "$d/response.out")
+    if [ -n "$PY" ]; then
+      if [ -s "$d/session.id" ]; then
+        "$CODEX" exec resume "${base[@]}" "$(cat "$d/session.id")" "$prompt" </dev/null 2>>"$d/codex.err" | "$PY" "$d/render.py" "$d/session.id" "$repo"
+      else
+        "$CODEX" exec "${base[@]}" -C "$repo" "$prompt" </dev/null 2>>"$d/codex.err" | "$PY" "$d/render.py" "$d/session.id" "$repo"
+      fi
     else
-      "$CODEX" exec "${base[@]}" -C "$repo" "$prompt"
-      sid="$(find "$HOME/.codex/sessions" -name 'rollout-*.jsonl' -type f -exec stat -f '%m %N' {} + 2>/dev/null \
-             | sort -rn | awk '{print $2}' \
-             | while read -r f; do grep -ql "$repo" "$f" 2>/dev/null && { echo "$f"; break; }; done \
-             | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | tail -1)"
-      [ -n "$sid" ] && echo "$sid" > "$d/session.id"
+      # no python3 — fall back to raw codex output + a narrow session-id capture
+      if [ -s "$d/session.id" ]; then
+        "$CODEX" exec resume "${base[@]}" "$(cat "$d/session.id")" "$prompt" </dev/null
+      else
+        "$CODEX" exec "${base[@]}" -C "$repo" "$prompt" </dev/null
+        grep -hoE '"thread_id":"[0-9a-f-]{36}"' "$d/response.out" 2>/dev/null | head -1 | grep -oE '[0-9a-f-]{36}' > "$d/session.id" || true
+      fi
     fi
-    printf '\n\033[1;32m✓ replied\033[0m\n'
     echo $(( $(cat "$d/turn") + 1 )) > "$d/turn"
   done
   ;;
@@ -122,9 +264,9 @@ send)
     die "worker '$worker' isn't running (window closed?) — re-spawn it"; fi
   n="$(cat "$d/turn" 2>/dev/null || echo 0)"; printf '%s' "$prompt" > "$d/inbox"
   if [ "$wait" = 1 ]; then
-    for _ in $(seq 1 1800); do
+    for _ in $(seq 1 3600); do
       [ "$(cat "$d/turn" 2>/dev/null || echo 0)" -gt "$n" ] && { cat "$d/response.out"; exit 0; }
-      sleep 0.5
+      sleep 0.25
     done
     die "timed out waiting for '$worker' — check the window; ginsu read $worker later"
   fi
@@ -132,7 +274,8 @@ send)
   ;;
 
 read)  worker="${1:?}"; cat "$(w_dir "$worker")/response.out" 2>/dev/null || echo "(no reply yet)";;
-diff)  worker="${1:?}"; r="$(cat "$(w_dir "$worker")/repo")"; git -C "$r" --no-pager status --short; echo; git -C "$r" --no-pager diff HEAD;;
+diff)  worker="${1:?}"; r="$(cat "$(w_dir "$worker")/repo")"; git -C "$r" --no-pager status --short; echo; \
+        if git -C "$r" rev-parse -q --verify HEAD >/dev/null 2>&1; then git -C "$r" --no-pager diff HEAD; else git -C "$r" --no-pager diff; fi;;
 apply) worker="${1:?}"; ( cd "$(cat "$(w_dir "$worker")/repo")" && "$CODEX" apply );;
 tail)  worker="${1:?}"; d="$(w_dir "$worker")"; echo "turn=$(cat "$d/turn" 2>/dev/null) session=$(cat "$d/session.id" 2>/dev/null)"; echo '--- last reply ---'; cat "$d/response.out" 2>/dev/null;;
 status) worker="${1:?}"; d="$(w_dir "$worker")"; pid="$(cat "$d/pid" 2>/dev/null)"; \
@@ -140,6 +283,6 @@ status) worker="${1:?}"; d="$(w_dir "$worker")"; pid="$(cat "$d/pid" 2>/dev/null
 list)  for d in "$ROOT"/*/; do [ -d "$d" ] || continue; w="$(basename "$d")"; pid="$(cat "$d/pid" 2>/dev/null)"; \
         kill -0 "$pid" 2>/dev/null && echo "● $w  RUNNING  $(cat "$d/repo")" || echo "○ $w  stopped"; done;;
 stop)  worker="${1:?}"; d="$(w_dir "$worker")"; kill "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null && echo "stopped $worker" || echo "$worker not running"; tmux kill-session -t "ginsu-$worker" 2>/dev/null || true;;
-version|-v|--version) echo "ginsu 1.0.0";;
+version|-v|--version) echo "ginsu 1.1.0";;
 *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//';;
 esac
