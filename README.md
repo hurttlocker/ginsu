@@ -45,7 +45,6 @@ ginsu diff  dev                  # see what Codex changed
 | `ginsu test <worker> [focus]` | ask Codex to write + run tests for the current changes |
 | `ginsu read <worker>` | print the latest reply |
 | `ginsu diff <worker>` | show what Codex changed (git status + diff) |
-| `ginsu apply <worker>` | apply Codex's latest proposed diff (sandbox modes) |
 | `ginsu list` / `status` / `tail` / `stop` | manage workers |
 
 Prompts are **queued per worker** — rapid or concurrent `send`s never clobber each other, and each reply is tied to its own prompt.
@@ -59,7 +58,7 @@ Prompts are **queued per worker** — rapid or concurrent `send`s never clobber 
 | `GINSU_SANDBOX` | `bypass` | `bypass` (full access) · `write` (workspace‑write) · `read` (read‑only) |
 | `GINSU_TERM` | `auto` | `iterm·terminal·tmux` |
 
-⚠️ **`bypass` runs Codex with `--dangerously-bypass-approvals-and-sandbox`** (full access, no sandbox). Convenient on a machine and repo you trust; use `GINSU_SANDBOX=write` for a safer default and `ginsu apply` to review-then-apply.
+⚠️ **`bypass` runs Codex with `--dangerously-bypass-approvals-and-sandbox`** (full access, no sandbox). Convenient on a machine and repo you trust; use `GINSU_SANDBOX=write` for a safer default and review with `ginsu diff` before you commit.
 
 ## How it works
 

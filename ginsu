@@ -14,7 +14,6 @@
 #   ginsu test   <worker> [focus]             write + run tests for the current changes (a mode)
 #   ginsu read   <worker>                      print the worker's latest reply
 #   ginsu diff   <worker>                      show what Codex changed (git status + diff)
-#   ginsu apply  <worker>                      git-apply Codex's latest proposed diff
 #   ginsu tail   <worker>                      turn count, queue depth, session id, last reply
 #   ginsu list   |  ginsu status <worker>  |  ginsu stop <worker>
 #
@@ -44,6 +43,40 @@ die(){ echo "ginsu: $*" >&2; exit 1; }
 # string the window runs — so allow ONLY [A-Za-z0-9_-]. This closes both path
 # traversal and shell-injection-into-the-terminal (RCE) at once.
 valid_worker(){ case "$1" in ''|*[!A-Za-z0-9_-]*) return 1;; *) return 0;; esac; }
+# alive only if the pid is running AND is actually a ginsu loop (guards PID reuse)
+worker_alive(){ local p; p="$(cat "$1/pid" 2>/dev/null)" || return 1; [ -n "$p" ] && kill -0 "$p" 2>/dev/null && ps -p "$p" -o command= 2>/dev/null | grep -q ginsu; }
+# best-effort: close the Terminal/iTerm window whose tty matches (never launches an app)
+close_window(){
+  local t="$1"; { [ -n "$t" ] && [ "$(uname)" = Darwin ]; } || return 0
+  if osascript -e 'application "Terminal" is running' 2>/dev/null | grep -q true; then
+    osascript >/dev/null 2>&1 <<OSA || true
+tell application "Terminal"
+  repeat with w in windows
+    try
+      repeat with tb in tabs of w
+        if tty of tb is "$t" then close w saving no
+      end repeat
+    end try
+  end repeat
+end tell
+OSA
+  fi
+  if osascript -e 'application "iTerm" is running' 2>/dev/null | grep -q true; then
+    osascript >/dev/null 2>&1 <<OSA || true
+tell application "iTerm"
+  repeat with w in windows
+    repeat with tb in tabs of w
+      repeat with s in sessions of tb
+        try
+          if tty of s is "$t" then close w
+        end try
+      end repeat
+    end repeat
+  end repeat
+end tell
+OSA
+  fi
+}
 
 # allocate a monotonic ticket under a mkdir-lock (breaks a stale lock after ~2s)
 alloc_seq(){ local d="$1" i=0 s; while ! mkdir "$d/lock" 2>/dev/null; do i=$((i+1)); [ "$i" -gt 100 ] && rmdir "$d/lock" 2>/dev/null; sleep 0.02; done; s=$(( $(cat "$d/seq" 2>/dev/null || echo 0) + 1 )); echo "$s" > "$d/seq"; rmdir "$d/lock" 2>/dev/null; echo "$s"; }
@@ -224,7 +257,7 @@ spawn)
   PY="$(command -v python3 || command -v python || true)"
   [ -n "$PY" ] || die "ginsu needs python3 (or python) on PATH for the worker window"
   d="$(w_dir "$worker")"
-  if [ -f "$d/pid" ] && kill -0 "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null; then
+  if worker_alive "$d"; then
     echo "worker '$worker' already running (pid $(cat "$d/pid"))"; exit 0; fi
   [ -x "$CODEX" ] || command -v "$CODEX" >/dev/null || die "codex CLI not found ($CODEX) — install Codex first"
   mkdir -p "$d"; rm -rf "$d/queue" "$d/meta" "$d/done" "$d/lock"
@@ -241,6 +274,7 @@ _loop)  # internal: the worker loop, runs inside the visible terminal
   cd "$repo" || exit 1
   trap 'rm -f "$d/pid"' EXIT
   echo $$ > "$d/pid"
+  tty > "$d/tty" 2>/dev/null || true
   mkdir -p "$d/queue" "$d/meta" "$d/done"
   [ -f "$d/render.py" ] || write_renderer "$d/render.py"
   PY="$(command -v python3 || command -v python || true)"
@@ -290,11 +324,11 @@ _loop)  # internal: the worker loop, runs inside the visible terminal
 
 send)
   worker="${1:?usage: ginsu send <worker> \"<prompt>\" [--no-wait] [--effort E] [--model M]}"; shift
-  prompt="${1:?need a prompt}"; shift
+  { [ $# -ge 1 ] && [ -n "$1" ]; } || die "need a prompt — ginsu send <worker> \"…\""
+  prompt="$1"; shift
   valid_worker "$worker" || die "bad worker name '$worker' — letters, digits, '_' and '-' only"
   d="$(w_dir "$worker")"; [ -d "$d" ] || die "no worker '$worker' — ginsu spawn it first"
-  if [ -f "$d/pid" ] && ! kill -0 "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null; then
-    die "worker '$worker' isn't running (window closed?) — re-spawn it"; fi
+  worker_alive "$d" || die "worker '$worker' isn't running (window closed?) — re-spawn it"
   wait=1; eff=-; mdl=-
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -311,7 +345,7 @@ send)
   if [ "$wait" = 1 ]; then
     for _ in $(seq 1 3600); do
       if [ -f "$d/done/$t.st" ]; then st="$(cat "$d/done/$t.st")"; cat "$d/done/$t"; rm -f "$d/done/$t" "$d/done/$t.st"; exit "${st:-1}"; fi
-      if [ -f "$d/pid" ] && ! kill -0 "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null; then die "worker '$worker' died mid-turn — check the window / codex.err"; fi
+      if ! worker_alive "$d"; then die "worker '$worker' died mid-turn — check the window / codex.err"; fi
       sleep 0.25
     done
     die "timed out waiting for '$worker' (ticket $t) — ginsu tail $worker; codex.err may explain"
@@ -332,14 +366,15 @@ test)
 read)  worker="${1:?}"; cat "$(w_dir "$worker")/response.out" 2>/dev/null || echo "(no reply yet)";;
 diff)  worker="${1:?}"; r="$(cat "$(w_dir "$worker")/repo")"; git -C "$r" --no-pager status --short; echo; \
         if git -C "$r" rev-parse -q --verify HEAD >/dev/null 2>&1; then git -C "$r" --no-pager diff HEAD; else git -C "$r" --no-pager diff; fi;;
-apply) worker="${1:?}"; ( cd "$(cat "$(w_dir "$worker")/repo")" && "$CODEX" apply );;
 tail)  worker="${1:?}"; d="$(w_dir "$worker")"; qd="$(ls "$d/queue" 2>/dev/null | wc -l | tr -d ' ')"; \
         echo "turn=$(cat "$d/turn" 2>/dev/null) queued=$qd session=$(cat "$d/session.id" 2>/dev/null)"; echo '--- last reply ---'; cat "$d/response.out" 2>/dev/null;;
-status) worker="${1:?}"; d="$(w_dir "$worker")"; pid="$(cat "$d/pid" 2>/dev/null)"; \
-        if kill -0 "$pid" 2>/dev/null; then echo "$worker: RUNNING (pid $pid) repo=$(cat "$d/repo") turn=$(cat "$d/turn")"; else echo "$worker: stopped"; fi;;
-list)  for d in "$ROOT"/*/; do [ -d "$d" ] || continue; w="$(basename "$d")"; pid="$(cat "$d/pid" 2>/dev/null)"; \
-        kill -0 "$pid" 2>/dev/null && echo "● $w  RUNNING  $(cat "$d/repo")" || echo "○ $w  stopped"; done;;
-stop)  worker="${1:?}"; d="$(w_dir "$worker")"; kill "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null && echo "stopped $worker" || echo "$worker not running"; tmux kill-session -t "ginsu-$worker" 2>/dev/null || true;;
-version|-v|--version) echo "ginsu 1.2.0";;
+status) worker="${1:?}"; d="$(w_dir "$worker")"; \
+        if worker_alive "$d"; then echo "$worker: RUNNING (pid $(cat "$d/pid")) repo=$(cat "$d/repo") turn=$(cat "$d/turn")"; else echo "$worker: stopped"; fi;;
+list)  for d in "$ROOT"/*/; do [ -d "$d" ] || continue; w="$(basename "$d")"; \
+        worker_alive "$d" && echo "● $w  RUNNING  $(cat "$d/repo")" || echo "○ $w  stopped"; done;;
+stop)  worker="${1:?}"; d="$(w_dir "$worker")"; tt="$(cat "$d/tty" 2>/dev/null)"; \
+        kill "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null && echo "stopped $worker" || echo "$worker not running"; \
+        tmux kill-session -t "ginsu-$worker" 2>/dev/null || true; close_window "$tt";;
+version|-v|--version) echo "ginsu 1.2.1";;
 *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//';;
 esac
