@@ -23,7 +23,14 @@ ginsu stop  <worker>                     # when finished
 
 `ginsu send` returns Codex's final message as text, so treat it like any tool result: read it, verify against `ginsu diff`, and send the next instruction. Give Codex the same quality of brief you'd want — context, the exact task, and what "done" looks like.
 
+## Modes & knobs
+- **Dial thinking per task:** `ginsu send <worker> "<prompt>" --effort xhigh` (or `low` for a mechanical edit) — overrides just that turn. `--model <name>` likewise.
+- **Adversarial review:** `ginsu review <worker> [focus]` — Codex reviews the repo and tries to refute it. Use it as a cross-model second opinion on your own change.
+- **Tests:** `ginsu test <worker> [focus]` — Codex writes and runs tests for the current changes.
+- Prompts queue per worker, so you can line several up; each `send` still returns its own reply.
+
 ## Rules
+- **A failed turn is loud, not silent.** `ginsu send` exits **nonzero** and returns a `⚠ ginsu: Codex turn failed…` message when Codex errors or times out — don't treat that as an answer; check `codex.err` (in `$GINSU_HOME/<worker>/`), then retry or fix.
 - **Verify, don't trust the reply.** After Codex says it's done, run `ginsu diff <worker>` (and tests) — a claim of success is not success.
 - **One worker per repo.** Don't spawn a second worker in the same repo, and don't run an interactive `codex` there while a worker is live.
 - **Mind the sandbox.** Default `GINSU_SANDBOX=bypass` gives Codex full access — only for repos the user trusts. Prefer `write` + `ginsu apply` when unsure.

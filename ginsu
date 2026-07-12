@@ -2,23 +2,26 @@
 # Ginsu — cut the work in half.
 #
 # Let your Claude Code agent spawn and drive a Codex agent running in a REAL
-# terminal window you can watch. Claude sends prompts, Codex does the work in the
-# repo, Claude reads the clean reply and sends the next one — a real conversation
-# (Codex remembers across turns). You watch the whole thing and keep talking to
-# Claude the entire time. No more copy-pasting prompts between two terminals.
+# terminal window you can watch. Claude sends prompts, Codex works in the repo,
+# Claude reads the clean reply and sends the next one — a real conversation
+# (Codex remembers across turns). You watch it all and keep talking to Claude.
 #
-#   ginsu spawn <worker> <repo>        open a visible Codex worker in <repo>
-#   ginsu send  <worker> "<prompt>"    send a prompt; WAITS and prints Codex's reply
-#   ginsu send  <worker> "<prompt>" --no-wait   fire-and-forget; read later
-#   ginsu read  <worker>               print the worker's latest reply
-#   ginsu diff  <worker>               show what Codex changed in the repo (git diff)
-#   ginsu apply <worker>               git-apply Codex's latest proposed diff (sandbox modes)
-#   ginsu tail  <worker>               turn count, session id, last reply
-#   ginsu list  |  ginsu status <worker>  |  ginsu stop <worker>
+#   ginsu spawn  <worker> <repo>              open a visible Codex worker in <repo>
+#   ginsu send   <worker> "<prompt>" [flags]  send a prompt; WAITS and prints Codex's reply
+#         flags: --no-wait  fire-and-forget    --effort low|medium|high|xhigh|max  (this turn)
+#                --model <name>  (this turn)
+#   ginsu review <worker> [focus]             adversarial code review of the repo (a mode)
+#   ginsu test   <worker> [focus]             write + run tests for the current changes (a mode)
+#   ginsu read   <worker>                      print the worker's latest reply
+#   ginsu diff   <worker>                      show what Codex changed (git status + diff)
+#   ginsu apply  <worker>                      git-apply Codex's latest proposed diff
+#   ginsu tail   <worker>                      turn count, queue depth, session id, last reply
+#   ginsu list   |  ginsu status <worker>  |  ginsu stop <worker>
 #
-# Backbone: the official Codex CLI (`codex exec --json` + `codex exec resume`).
-# The window renders Codex's event stream itself — reasoning, commands, file
-# edits, and the reply — so it stays clean and readable, not raw log spew.
+# `send` returns Codex's reply as text and EXITS NONZERO if the turn failed or
+# timed out — so a caller can trust the reply or react to the failure. Prompts
+# are queued per worker (no lost prompts), and each reply is tied to its own
+# prompt. Backbone: the official Codex CLI (`codex exec --json` + `resume`).
 set -uo pipefail
 
 CODEX="${GINSU_CODEX:-$(command -v codex || echo "$HOME/.npm-global/bin/codex")}"
@@ -37,9 +40,17 @@ esac
 
 w_dir(){ echo "$ROOT/$1"; }
 die(){ echo "ginsu: $*" >&2; exit 1; }
+# worker names become path components AND get embedded in the AppleScript shell
+# string the window runs — so allow ONLY [A-Za-z0-9_-]. This closes both path
+# traversal and shell-injection-into-the-terminal (RCE) at once.
+valid_worker(){ case "$1" in ''|*[!A-Za-z0-9_-]*) return 1;; *) return 0;; esac; }
+
+# allocate a monotonic ticket under a mkdir-lock (breaks a stale lock after ~2s)
+alloc_seq(){ local d="$1" i=0 s; while ! mkdir "$d/lock" 2>/dev/null; do i=$((i+1)); [ "$i" -gt 100 ] && rmdir "$d/lock" 2>/dev/null; sleep 0.02; done; s=$(( $(cat "$d/seq" 2>/dev/null || echo 0) + 1 )); echo "$s" > "$d/seq"; rmdir "$d/lock" 2>/dev/null; echo "$s"; }
+# keep only the newest ~30 completed-turn results
+prune_done(){ local d="$1" keep=30 files n; files="$(ls "$d/done" 2>/dev/null | grep -vE '\.st$' | sort -n)"; n="$(printf '%s\n' "$files" | grep -c .)"; if [ "${n:-0}" -gt "$keep" ]; then printf '%s\n' "$files" | head -n "$((n-keep))" | while read -r old; do rm -f "$d/done/$old" "$d/done/$old.st"; done; fi; }
 
 # The renderer: turns `codex exec --json` events into a clean, colored window.
-# Written to the worker dir once per spawn so ginsu stays a single portable file.
 write_renderer(){
   cat > "$1" <<'PYEOF'
 import sys, json, time, select, os, shutil, textwrap, re
@@ -86,7 +97,11 @@ def rel(p):
     if repo and p.startswith(repo): p=p[len(repo):].lstrip("/")
     return p
 
+ANSI_RE=re.compile(r'\x1b\[[0-9;?]*[ -/]*[@-~]')
+def clean(s): return ANSI_RE.sub('', s or '').replace('\r','')
+
 def unwrap(cmd):
+    cmd=clean(cmd)
     m=re.match(r"^(?:/[\w./-]+/)?(?:ba|z)?sh\s+-l?c\s+(['\"])(.*)\1\s*$", cmd.strip(), re.S)
     return m.group(2).strip() if m else cmd.strip()
 
@@ -115,7 +130,7 @@ def render(o):
         if txt: out("%s· %s%s" % (DIM, txt.split("\n")[0][:200], RESET))
     elif k=="command_execution":
         out("%s$ %s%s" % (GREEN, unwrap(it.get("command","")), RESET))
-        aout=(it.get("aggregated_output") or "").rstrip("\n")
+        aout=clean(it.get("aggregated_output") or "").rstrip("\n")
         if aout:
             ls=aout.split("\n"); shown=ls[:18]
             for L in shown: out("%s  %s%s" % (DIM, L[:width()-2], RESET))
@@ -172,24 +187,26 @@ launch_window(){
   fi
   case "$pref" in
     iterm)
-      osascript >/dev/null 2>&1 <<OSA
+      err="$(osascript 2>&1 >/dev/null <<OSA
 tell application "iTerm"
   create window with default profile
   tell current session of current window to write text "$cmd"
 end tell
 OSA
+)"; [ $? -eq 0 ] || die "couldn't open an iTerm window (osascript: ${err:-permission denied?}). Grant Automation permission (System Settings ▸ Privacy & Security ▸ Automation) or set GINSU_TERM=terminal|tmux"
       echo "opened in iTerm";;
     terminal)
-      osascript >/dev/null 2>&1 <<OSA
+      err="$(osascript 2>&1 >/dev/null <<OSA
 tell application "Terminal"
   activate
   do script "$cmd"
 end tell
 OSA
+)"; [ $? -eq 0 ] || die "couldn't open a Terminal window (osascript: ${err:-permission denied?}). Grant Automation permission (System Settings ▸ Privacy & Security ▸ Automation) or set GINSU_TERM=tmux"
       echo "opened in Terminal";;
     tmux)
       command -v tmux >/dev/null || die "tmux not found — install it, or set GINSU_TERM=iterm|terminal on macOS"
-      tmux new-session -d -s "ginsu-$worker" "$SELF" _loop "$worker"
+      tmux new-session -d -s "ginsu-$worker" "$SELF" _loop "$worker" || die "tmux couldn't start the worker session"
       echo "started in tmux — watch it with:  tmux attach -t ginsu-$worker";;
     *) die "bad GINSU_TERM '$pref'";;
   esac
@@ -202,16 +219,21 @@ case "$cmd" in
 
 spawn)
   worker="${1:?usage: ginsu spawn <worker> <repo>}"; repo="${2:?need repo path}"
+  valid_worker "$worker" || die "bad worker name '$worker' — letters, digits, '_' and '-' only"
   repo="$(cd "$repo" 2>/dev/null && pwd)" || die "no such repo: $2"
+  PY="$(command -v python3 || command -v python || true)"
+  [ -n "$PY" ] || die "ginsu needs python3 (or python) on PATH for the worker window"
   d="$(w_dir "$worker")"
   if [ -f "$d/pid" ] && kill -0 "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null; then
     echo "worker '$worker' already running (pid $(cat "$d/pid"))"; exit 0; fi
   [ -x "$CODEX" ] || command -v "$CODEX" >/dev/null || die "codex CLI not found ($CODEX) — install Codex first"
-  mkdir -p "$d"; rm -f "$d/inbox" "$d/session.id" "$d/response.out" "$d/codex.err"; echo 0 > "$d/turn"; echo "$repo" > "$d/repo"
+  mkdir -p "$d"; rm -rf "$d/queue" "$d/meta" "$d/done" "$d/lock"
+  rm -f "$d/inbox" "$d/session.id" "$d/response.out" "$d/codex.err"
+  mkdir -p "$d/queue" "$d/meta" "$d/done"; echo 0 > "$d/turn"; echo 0 > "$d/seq"; echo "$repo" > "$d/repo"
   write_renderer "$d/render.py"
   launch_window "$worker" "$repo"
   echo "spawned worker '$worker' → $repo   ($MODEL, effort $EFFORT, sandbox $SANDBOX)"
-  echo "  ginsu send $worker \"do X\"   |   ginsu diff $worker"
+  echo "  ginsu send $worker \"do X\"   |   ginsu review $worker   |   ginsu diff $worker"
   ;;
 
 _loop)  # internal: the worker loop, runs inside the visible terminal
@@ -219,70 +241,105 @@ _loop)  # internal: the worker loop, runs inside the visible terminal
   cd "$repo" || exit 1
   trap 'rm -f "$d/pid"' EXIT
   echo $$ > "$d/pid"
+  mkdir -p "$d/queue" "$d/meta" "$d/done"
   [ -f "$d/render.py" ] || write_renderer "$d/render.py"
-  PY="$(command -v python3 || true)"
-  cols=$(tput cols 2>/dev/null || echo 80)
-  rule=$(printf '─%.0s' $(seq 1 "$cols"))
+  PY="$(command -v python3 || command -v python || true)"
+  [ -n "$PY" ] || { echo "ginsu: python3 required for the worker renderer"; sleep 5; exit 1; }
+  cols=$(tput cols 2>/dev/null || echo 80); rule=$(printf '─%.0s' $(seq 1 "$cols"))
   printf '\033[1;38;5;208m  ▟▛ ginsu\033[0m  \033[1mworker:\033[0m %s\n' "$worker"
   printf '  \033[2mrepo\033[0m   %s\n' "$repo"
   printf '  \033[2mmodel\033[0m  %s \033[2m·\033[0m effort %s \033[2m·\033[0m sandbox %s\n' "$MODEL" "$EFFORT" "$SANDBOX"
   printf '\033[38;5;240m%s\033[0m\n' "$rule"
   printf '\033[2m  waiting for prompts…\033[0m\n'
   while true; do
-    while [ ! -f "$d/inbox" ]; do sleep 0.2; done
-    prompt="$(cat "$d/inbox")"; rm -f "$d/inbox"
+    t="$(ls "$d/queue" 2>/dev/null | sort -n | head -1)"
+    if [ -z "$t" ]; then sleep 0.2; continue; fi
+    prompt="$(cat "$d/queue/$t")"; rm -f "$d/queue/$t"
+    eff="$EFFORT"; mdl="$MODEL"
+    if [ -f "$d/meta/$t" ]; then read -r me mm < "$d/meta/$t" || true
+      [ -n "${me:-}" ] && [ "$me" != - ] && eff="$me"
+      [ -n "${mm:-}" ] && [ "$mm" != - ] && mdl="$mm"; rm -f "$d/meta/$t"; fi
     cols=$(tput cols 2>/dev/null || echo 80); rule=$(printf '─%.0s' $(seq 1 "$cols"))
     n="$(cat "$d/turn" 2>/dev/null || echo 0)"
+    extra=""; [ "$eff" != "$EFFORT" ] && extra=" · effort $eff"; [ "$mdl" != "$MODEL" ] && extra="$extra · model $mdl"
     printf '\n\033[38;5;240m%s\033[0m\n' "$rule"
-    printf '\033[1;38;5;39m▸ Claude\033[0m \033[2m· turn %s\033[0m\n' "$((n+1))"
+    printf '\033[1;38;5;39m▸ Claude\033[0m \033[2m· turn %s%s\033[0m\n' "$((n+1))" "$extra"
     printf '\033[38;5;250m%s\033[0m\n\n' "$prompt"
-    base=("${SBX[@]}" -m "$MODEL" -c "model_reasoning_effort=\"$EFFORT\"" --json -o "$d/response.out")
-    if [ -n "$PY" ]; then
-      if [ -s "$d/session.id" ]; then
-        "$CODEX" exec resume "${base[@]}" "$(cat "$d/session.id")" "$prompt" </dev/null 2>>"$d/codex.err" | "$PY" "$d/render.py" "$d/session.id" "$repo"
-      else
-        "$CODEX" exec "${base[@]}" -C "$repo" "$prompt" </dev/null 2>>"$d/codex.err" | "$PY" "$d/render.py" "$d/session.id" "$repo"
-      fi
+    : > "$d/response.out"
+    base=("${SBX[@]}" -m "$mdl" -c "model_reasoning_effort=\"$eff\"" --json -o "$d/response.out")
+    if [ -s "$d/session.id" ]; then
+      "$CODEX" exec resume "${base[@]}" "$(cat "$d/session.id")" "$prompt" </dev/null 2>>"$d/codex.err" | "$PY" "$d/render.py" "$d/session.id" "$repo"
+      rc=${PIPESTATUS[0]}
     else
-      # no python3 — fall back to raw codex output + a narrow session-id capture
-      if [ -s "$d/session.id" ]; then
-        "$CODEX" exec resume "${base[@]}" "$(cat "$d/session.id")" "$prompt" </dev/null
-      else
-        "$CODEX" exec "${base[@]}" -C "$repo" "$prompt" </dev/null
-        grep -hoE '"thread_id":"[0-9a-f-]{36}"' "$d/response.out" 2>/dev/null | head -1 | grep -oE '[0-9a-f-]{36}' > "$d/session.id" || true
-      fi
+      "$CODEX" exec "${base[@]}" -C "$repo" "$prompt" </dev/null 2>>"$d/codex.err" | "$PY" "$d/render.py" "$d/session.id" "$repo"
+      rc=${PIPESTATUS[0]}
     fi
-    echo $(( $(cat "$d/turn") + 1 )) > "$d/turn"
+    if [ "$rc" = 0 ]; then
+      if [ -s "$d/response.out" ]; then cp "$d/response.out" "$d/done/$t"
+      else printf '(Codex finished with no message)' > "$d/done/$t"; cp "$d/done/$t" "$d/response.out"; fi
+      echo 0 > "$d/done/$t.st"
+    else
+      { printf '⚠ ginsu: Codex turn failed (exit %s).\n' "$rc"; echo '--- last lines of codex.err ---'; tail -n 4 "$d/codex.err" 2>/dev/null; } > "$d/done/$t"
+      cp "$d/done/$t" "$d/response.out"; echo "$rc" > "$d/done/$t.st"
+      printf '\033[38;5;203m✗ Codex turn failed (exit %s) — see codex.err\033[0m\n' "$rc"
+    fi
+    echo $(( n + 1 )) > "$d/turn"
+    prune_done "$d"
   done
   ;;
 
 send)
-  worker="${1:?usage: ginsu send <worker> \"<prompt>\" [--no-wait]}"; prompt="${2:?need a prompt}"
-  wait=1; [ "${3:-}" = "--no-wait" ] && wait=0
+  worker="${1:?usage: ginsu send <worker> \"<prompt>\" [--no-wait] [--effort E] [--model M]}"; shift
+  prompt="${1:?need a prompt}"; shift
+  valid_worker "$worker" || die "bad worker name '$worker' — letters, digits, '_' and '-' only"
   d="$(w_dir "$worker")"; [ -d "$d" ] || die "no worker '$worker' — ginsu spawn it first"
   if [ -f "$d/pid" ] && ! kill -0 "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null; then
     die "worker '$worker' isn't running (window closed?) — re-spawn it"; fi
-  n="$(cat "$d/turn" 2>/dev/null || echo 0)"; printf '%s' "$prompt" > "$d/inbox"
+  wait=1; eff=-; mdl=-
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-wait) wait=0;;
+      --effort) eff="${2:?--effort needs a value}"; shift;;
+      --model)  mdl="${2:?--model needs a value}"; shift;;
+      *) die "unknown flag '$1'";;
+    esac; shift
+  done
+  mkdir -p "$d/queue" "$d/meta" "$d/done"
+  t="$(alloc_seq "$d")"
+  if [ "$eff" != - ] || [ "$mdl" != - ]; then printf '%s %s\n' "$eff" "$mdl" > "$d/meta/$t"; fi
+  printf '%s' "$prompt" > "$d/queue/.$t.tmp"; mv "$d/queue/.$t.tmp" "$d/queue/$t"
   if [ "$wait" = 1 ]; then
     for _ in $(seq 1 3600); do
-      [ "$(cat "$d/turn" 2>/dev/null || echo 0)" -gt "$n" ] && { cat "$d/response.out"; exit 0; }
+      if [ -f "$d/done/$t.st" ]; then st="$(cat "$d/done/$t.st")"; cat "$d/done/$t"; rm -f "$d/done/$t" "$d/done/$t.st"; exit "${st:-1}"; fi
+      if [ -f "$d/pid" ] && ! kill -0 "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null; then die "worker '$worker' died mid-turn — check the window / codex.err"; fi
       sleep 0.25
     done
-    die "timed out waiting for '$worker' — check the window; ginsu read $worker later"
+    die "timed out waiting for '$worker' (ticket $t) — ginsu tail $worker; codex.err may explain"
   fi
-  echo "queued → $worker"
+  echo "queued → $worker (ticket $t)"
+  ;;
+
+review)
+  worker="${1:?usage: ginsu review <worker> [focus]}"; focus="${2:-}"
+  exec "$SELF" send "$worker" "You are an adversarial code reviewer. Review the current repository and its working changes and try to REFUTE their correctness — hunt for real bugs, edge cases, races, and security issues.${focus:+ Focus on: $focus.} Report each finding as: severity · file:line · the concrete failure (inputs → wrong result) · a one-line fix. If you find nothing real, say so plainly. Do not modify anything."
+  ;;
+
+test)
+  worker="${1:?usage: ginsu test <worker> [focus]}"; focus="${2:-}"
+  exec "$SELF" send "$worker" "Write and run tests for the current changes.${focus:+ Focus on: $focus.} Cover the happy path and the edge cases most likely to break it, actually run them, and report pass/fail with the command output. Only change code if a test reveals a clear bug — if so, say what you changed and why."
   ;;
 
 read)  worker="${1:?}"; cat "$(w_dir "$worker")/response.out" 2>/dev/null || echo "(no reply yet)";;
 diff)  worker="${1:?}"; r="$(cat "$(w_dir "$worker")/repo")"; git -C "$r" --no-pager status --short; echo; \
         if git -C "$r" rev-parse -q --verify HEAD >/dev/null 2>&1; then git -C "$r" --no-pager diff HEAD; else git -C "$r" --no-pager diff; fi;;
 apply) worker="${1:?}"; ( cd "$(cat "$(w_dir "$worker")/repo")" && "$CODEX" apply );;
-tail)  worker="${1:?}"; d="$(w_dir "$worker")"; echo "turn=$(cat "$d/turn" 2>/dev/null) session=$(cat "$d/session.id" 2>/dev/null)"; echo '--- last reply ---'; cat "$d/response.out" 2>/dev/null;;
+tail)  worker="${1:?}"; d="$(w_dir "$worker")"; qd="$(ls "$d/queue" 2>/dev/null | wc -l | tr -d ' ')"; \
+        echo "turn=$(cat "$d/turn" 2>/dev/null) queued=$qd session=$(cat "$d/session.id" 2>/dev/null)"; echo '--- last reply ---'; cat "$d/response.out" 2>/dev/null;;
 status) worker="${1:?}"; d="$(w_dir "$worker")"; pid="$(cat "$d/pid" 2>/dev/null)"; \
         if kill -0 "$pid" 2>/dev/null; then echo "$worker: RUNNING (pid $pid) repo=$(cat "$d/repo") turn=$(cat "$d/turn")"; else echo "$worker: stopped"; fi;;
 list)  for d in "$ROOT"/*/; do [ -d "$d" ] || continue; w="$(basename "$d")"; pid="$(cat "$d/pid" 2>/dev/null)"; \
         kill -0 "$pid" 2>/dev/null && echo "● $w  RUNNING  $(cat "$d/repo")" || echo "○ $w  stopped"; done;;
 stop)  worker="${1:?}"; d="$(w_dir "$worker")"; kill "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null && echo "stopped $worker" || echo "$worker not running"; tmux kill-session -t "ginsu-$worker" 2>/dev/null || true;;
-version|-v|--version) echo "ginsu 1.1.0";;
-*) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//';;
+version|-v|--version) echo "ginsu 1.2.0";;
+*) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//';;
 esac
