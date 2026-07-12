@@ -14,6 +14,7 @@
 #   ginsu test   <worker> [focus]             write + run tests for the current changes (a mode)
 #   ginsu read   <worker>                      print the worker's latest reply
 #   ginsu diff   <worker>                      show what Codex changed (git status + diff)
+#   ginsu logs   <worker> [n]                  show Codex's stderr (debug a failed turn)
 #   ginsu tail   <worker>                      turn count, queue depth, session id, last reply
 #   ginsu list   |  ginsu status <worker>  |  ginsu stop <worker>
 #
@@ -29,6 +30,7 @@ EFFORT="${GINSU_EFFORT:-high}"        # low|medium|high|xhigh|max (ultra = token
 SANDBOX="${GINSU_SANDBOX:-bypass}"    # bypass (full access) | write (workspace-write) | read (read-only)
 TERM_PREF="${GINSU_TERM:-auto}"       # auto | iterm | terminal | tmux
 ROOT="${GINSU_HOME:-$HOME/.ginsu}"
+TIMEOUT="${GINSU_TIMEOUT:-900}"       # seconds a blocking `send` waits before giving up
 
 case "$SANDBOX" in
   bypass) SBX=(--dangerously-bypass-approvals-and-sandbox);;
@@ -259,6 +261,9 @@ spawn)
   d="$(w_dir "$worker")"
   if worker_alive "$d"; then
     echo "worker '$worker' already running (pid $(cat "$d/pid"))"; exit 0; fi
+  # one worker per repo — refuse to open a second in the same tree (they'd clobber each other)
+  for od in "$ROOT"/*/; do [ -d "$od" ] || continue; ow="$(basename "$od")"; [ "$ow" = "$worker" ] && continue
+    if worker_alive "$od" && [ "$(cat "$od/repo" 2>/dev/null)" = "$repo" ]; then die "worker '$ow' is already running in $repo — one worker per repo (ginsu stop $ow first)"; fi; done
   [ -x "$CODEX" ] || command -v "$CODEX" >/dev/null || die "codex CLI not found ($CODEX) — install Codex first"
   mkdir -p "$d"; rm -rf "$d/queue" "$d/meta" "$d/done" "$d/lock"
   rm -f "$d/inbox" "$d/session.id" "$d/response.out" "$d/codex.err"
@@ -279,6 +284,7 @@ _loop)  # internal: the worker loop, runs inside the visible terminal
   [ -f "$d/render.py" ] || write_renderer "$d/render.py"
   PY="$(command -v python3 || command -v python || true)"
   [ -n "$PY" ] || { echo "ginsu: python3 required for the worker renderer"; sleep 5; exit 1; }
+  printf '\033]0;ginsu: %s\007' "$worker"          # name the window so it's findable
   cols=$(tput cols 2>/dev/null || echo 80); rule=$(printf '─%.0s' $(seq 1 "$cols"))
   printf '\033[1;38;5;208m  ▟▛ ginsu\033[0m  \033[1mworker:\033[0m %s\n' "$worker"
   printf '  \033[2mrepo\033[0m   %s\n' "$repo"
@@ -343,12 +349,12 @@ send)
   if [ "$eff" != - ] || [ "$mdl" != - ]; then printf '%s %s\n' "$eff" "$mdl" > "$d/meta/$t"; fi
   printf '%s' "$prompt" > "$d/queue/.$t.tmp"; mv "$d/queue/.$t.tmp" "$d/queue/$t"
   if [ "$wait" = 1 ]; then
-    for _ in $(seq 1 3600); do
+    for _ in $(seq 1 $(( TIMEOUT * 4 )) ); do
       if [ -f "$d/done/$t.st" ]; then st="$(cat "$d/done/$t.st")"; cat "$d/done/$t"; rm -f "$d/done/$t" "$d/done/$t.st"; exit "${st:-1}"; fi
-      if ! worker_alive "$d"; then die "worker '$worker' died mid-turn — check the window / codex.err"; fi
+      if ! worker_alive "$d"; then die "worker '$worker' died mid-turn — check the window / ginsu logs $worker"; fi
       sleep 0.25
     done
-    die "timed out waiting for '$worker' (ticket $t) — ginsu tail $worker; codex.err may explain"
+    die "timed out after ${TIMEOUT}s waiting for '$worker' (ticket $t) — ginsu tail $worker; ginsu logs $worker may explain (raise GINSU_TIMEOUT for long tasks)"
   fi
   echo "queued → $worker (ticket $t)"
   ;;
@@ -364,6 +370,7 @@ test)
   ;;
 
 read)  worker="${1:?}"; cat "$(w_dir "$worker")/response.out" 2>/dev/null || echo "(no reply yet)";;
+logs)  worker="${1:?}"; tail -n "${2:-40}" "$(w_dir "$worker")/codex.err" 2>/dev/null || echo "(no Codex stderr yet)";;
 diff)  worker="${1:?}"; r="$(cat "$(w_dir "$worker")/repo")"; git -C "$r" --no-pager status --short; echo; \
         if git -C "$r" rev-parse -q --verify HEAD >/dev/null 2>&1; then git -C "$r" --no-pager diff HEAD; else git -C "$r" --no-pager diff; fi;;
 tail)  worker="${1:?}"; d="$(w_dir "$worker")"; qd="$(ls "$d/queue" 2>/dev/null | wc -l | tr -d ' ')"; \
@@ -375,6 +382,6 @@ list)  for d in "$ROOT"/*/; do [ -d "$d" ] || continue; w="$(basename "$d")"; \
 stop)  worker="${1:?}"; d="$(w_dir "$worker")"; tt="$(cat "$d/tty" 2>/dev/null)"; \
         kill "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null && echo "stopped $worker" || echo "$worker not running"; \
         tmux kill-session -t "ginsu-$worker" 2>/dev/null || true; close_window "$tt";;
-version|-v|--version) echo "ginsu 1.2.1";;
+version|-v|--version) echo "ginsu 1.3.0";;
 *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//';;
 esac

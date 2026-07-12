@@ -30,7 +30,7 @@ ginsu stop  <worker>                     # when finished
 - Prompts queue per worker, so you can line several up; each `send` still returns its own reply.
 
 ## Rules
-- **A failed turn is loud, not silent.** `ginsu send` exits **nonzero** and returns a `⚠ ginsu: Codex turn failed…` message when Codex errors or times out — don't treat that as an answer; check `codex.err` (in `$GINSU_HOME/<worker>/`), then retry or fix.
+- **A failed turn is loud, not silent.** `ginsu send` exits **nonzero** and returns a `⚠ ginsu: Codex turn failed…` message when Codex errors or times out — don't treat that as an answer; run `ginsu logs <worker>` to see why, then retry or fix. (Long task timing out? Raise `GINSU_TIMEOUT`.)
 - **Verify, don't trust the reply.** After Codex says it's done, run `ginsu diff <worker>` (and tests) — a claim of success is not success.
 - **One worker per repo.** Don't spawn a second worker in the same repo, and don't run an interactive `codex` there while a worker is live.
 - **Mind the sandbox.** Default `GINSU_SANDBOX=bypass` gives Codex full access — only for repos the user trusts. Prefer `write` and review with `ginsu diff` when unsure.

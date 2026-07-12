@@ -14,5 +14,6 @@ ln -sfn "$src" "$target"
 echo "✓ linked ginsu → $target"
 
 command -v codex >/dev/null || echo "  ⚠ Codex CLI not found on PATH — install it: https://github.com/openai/codex"
+command -v python3 >/dev/null || command -v python >/dev/null || echo "  ⚠ python3 not found on PATH — ginsu needs it to render the worker window"
 case ":$PATH:" in *":$(dirname "$target"):"*) ;; *) echo "  ⚠ add $(dirname "$target") to your PATH";; esac
 echo "  try:  ginsu spawn dev <a-repo>   then   ginsu send dev \"say hi\""
