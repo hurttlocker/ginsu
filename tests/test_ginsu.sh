@@ -31,11 +31,14 @@ cat > "$TMP/bin/codex" <<'FAKE_CODEX'
 set -u
 mode=first; out=""; prompt="${!#}"
 printf '%s\n' "$*" >> "$(dirname "$0")/codex.args"
+has_sandbox=0
 for ((i=1; i<=$#; i++)); do
   arg="${!i}"
   [ "$arg" = resume ] && mode=resume
+  [ "$arg" = --sandbox ] && has_sandbox=1
   if [ "$arg" = -o ]; then j=$((i+1)); out="${!j}"; fi
 done
+if [ "$mode" = resume ] && [ "$has_sandbox" = 1 ]; then echo "resume received unsupported --sandbox" >&2; exit 64; fi
 if [ "$prompt" = fail ]; then echo "fake codex failure" >&2; exit 23; fi
 [ "$prompt" = slow ] && sleep 0.3
 reply="codex:$mode:$prompt"

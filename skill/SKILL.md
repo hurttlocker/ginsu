@@ -44,4 +44,4 @@ Use:
 
 ## Maintain Ginsu
 
-Read the single `ginsu` Bash file before changing it. After changes, run `bash -n ginsu`, `git diff --check`, and the fake-backend harness. Test first-turn session creation, resumed turns, queue ownership, explicit failures, engine-preserving restart, and the nesting guard before opening a PR.
+Read the single `ginsu` Bash file before changing it. Keep Codex sandbox flags on the first `exec` only; current `codex exec resume` rejects `--sandbox` and inherits the session sandbox. After changes, run `bash -n ginsu`, `git diff --check`, and the fake-backend harness. Test first-turn session creation, resumed turns, queue ownership, explicit failures, engine-preserving restart, and the nesting guard before opening a PR.

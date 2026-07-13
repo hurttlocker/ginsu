@@ -85,7 +85,7 @@ Ginsu also exports a delegation depth inside every worker. Nested calls that inh
 
 ## How it works
 
-- Codex turn 1 uses `codex exec --json`; later turns use `codex exec resume <session-id>`.
+- Codex turn 1 uses `codex exec --json`; later turns use `codex exec resume <session-id>`. Resume inherits the session sandbox because current Codex rejects `--sandbox` on the resume subcommand.
 - Claude turn 1 uses `claude -p --output-format stream-json --session-id <uuid>`; later turns use `--resume <session-id>`.
 - A backend-aware renderer turns each JSON event stream into a clean visible window and writes the final response to the caller's ticket.
 - `spawn` opens the worker loop via Terminal/iTerm or tmux. The loop processes queued tickets in order and persists session state under `~/.ginsu/<worker>/`.

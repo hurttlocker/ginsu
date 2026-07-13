@@ -443,11 +443,15 @@ _loop)  # internal: the worker loop, runs inside the visible terminal
     printf '\033[38;5;250m%s\033[0m\n\n' "$prompt"
     : > "$d/response.out"
     if [ "$engine" = codex ]; then
-      base=("${SBX[@]}" -m "$mdl" -c "model_reasoning_effort=\"$eff\"" --json -o "$d/response.out")
       if [ -s "$d/session.id" ]; then
+        # Current Codex rejects --sandbox on resume; the initial session keeps
+        # its sandbox. Bypass is a distinct resume flag and must stay explicit.
+        base=(-m "$mdl" -c "model_reasoning_effort=\"$eff\"" --json -o "$d/response.out")
+        [ "$SANDBOX" = bypass ] && base=(--dangerously-bypass-approvals-and-sandbox "${base[@]}")
         "$CODEX" exec resume "${base[@]}" "$(cat "$d/session.id")" "$prompt" </dev/null 2>>"$d/codex.err" | "$PY" "$d/render.py" "$d/session.id" "$repo" "$engine" "$d/response.out"
         prc=("${PIPESTATUS[@]}"); rc="${prc[0]}"; [ "$rc" != 0 ] || rc="${prc[1]}"
       else
+        base=("${SBX[@]}" -m "$mdl" -c "model_reasoning_effort=\"$eff\"" --json -o "$d/response.out")
         "$CODEX" exec "${base[@]}" -C "$repo" "$prompt" </dev/null 2>>"$d/codex.err" | "$PY" "$d/render.py" "$d/session.id" "$repo" "$engine" "$d/response.out"
         prc=("${PIPESTATUS[@]}"); rc="${prc[0]}"; [ "$rc" != 0 ] || rc="${prc[1]}"
       fi
