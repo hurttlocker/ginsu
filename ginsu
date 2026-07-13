@@ -16,6 +16,7 @@
 #   ginsu diff   <worker>                      show what Codex changed (git status + diff)
 #   ginsu logs   <worker> [n]                  show Codex's stderr (debug a failed turn)
 #   ginsu tail   <worker>                      turn count, queue depth, session id, last reply
+#   ginsu restart <worker>                    stop and spawn the worker again in its saved repo
 #   ginsu list   |  ginsu status <worker>  |  ginsu stop <worker>
 #
 # `send` returns Codex's reply as text and EXITS NONZERO if the turn failed or
@@ -270,6 +271,11 @@ spawn)
   mkdir -p "$d/queue" "$d/meta" "$d/done"; echo 0 > "$d/turn"; echo 0 > "$d/seq"; echo "$repo" > "$d/repo"
   write_renderer "$d/render.py"
   launch_window "$worker" "$repo"
+  for _ in $(seq 1 40); do
+    worker_alive "$d" && break
+    sleep 0.25
+  done
+  worker_alive "$d" || echo "ginsu: warning: worker '$worker' didn't start within 10s" >&2
   echo "spawned worker '$worker' → $repo   ($MODEL, effort $EFFORT, sandbox $SANDBOX)"
   echo "  ginsu send $worker \"do X\"   |   ginsu review $worker   |   ginsu diff $worker"
   ;;
@@ -382,6 +388,9 @@ list)  for d in "$ROOT"/*/; do [ -d "$d" ] || continue; w="$(basename "$d")"; \
 stop)  worker="${1:?}"; d="$(w_dir "$worker")"; tt="$(cat "$d/tty" 2>/dev/null)"; \
         kill "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null && echo "stopped $worker" || echo "$worker not running"; \
         tmux kill-session -t "ginsu-$worker" 2>/dev/null || true; close_window "$tt";;
-version|-v|--version) echo "ginsu 1.3.1";;
+restart) worker="${1:?usage: ginsu restart <worker>}"; d="$(w_dir "$worker")"; \
+        repo="$(cat "$d/repo" 2>/dev/null)" || die "no worker '$worker' — ginsu spawn it first"; \
+        worker_alive "$d" && "$SELF" stop "$worker"; exec "$SELF" spawn "$worker" "$repo";;
+version|-v|--version) echo "ginsu 1.4.0";;
 *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//';;
 esac

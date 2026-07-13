@@ -43,6 +43,7 @@ ginsu diff  dev                  # see what Codex changed
 | `ginsu send <worker> "<prompt>" [--no-wait] [--effort E] [--model M]` | send a prompt; waits and prints the reply. `--effort`/`--model` override just this turn |
 | `ginsu review <worker> [focus]` | ask Codex to adversarially review the repo |
 | `ginsu test <worker> [focus]` | ask Codex to write + run tests for the current changes |
+| `ginsu restart <worker>` | stop the worker if running, then spawn it again in its saved repo |
 | `ginsu read <worker>` | print the latest reply |
 | `ginsu diff <worker>` | show what Codex changed (git status + diff) |
 | `ginsu logs <worker> [n]` | show Codex's stderr — debug a failed turn |
