@@ -45,3 +45,10 @@ Use:
 ## Maintain Ginsu
 
 Read the single `ginsu` Bash file before changing it. Keep Codex sandbox flags on the first `exec` only; current `codex exec resume` rejects `--sandbox` and inherits the session sandbox. After changes, run `bash -n ginsu`, `git diff --check`, and the fake-backend harness. Test first-turn session creation, resumed turns, queue ownership, explicit failures, engine-preserving restart, and the nesting guard before opening a PR.
+
+## Field lessons (from production dogfooding)
+
+- **Long build turns outlive the default wait.** `ginsu send` gives up at `GINSU_TIMEOUT` (900s default) — but the worker keeps cutting; a timed-out send loses only the wait, never the work. Raise it per-send for build-sized tasks (`GINSU_TIMEOUT=1800 ginsu send …`). To re-attach after a timeout: poll `$GINSU_HOME/<worker>/done/<ticket>.st` (send printed the ticket) and read `response.out` when it appears — the `.st` file holds the turn's exit code.
+- **Queue while it works.** Sends queue in ticket order, so you can fire an amendment mid-turn and the worker course-corrects on its next turn — no need to wait out the current turn before refining the spec.
+- **Worker stderr accumulates across turns**, and every backend boot dumps MCP-auth chatter into it — when a turn fails, grep near the failure's timeframe instead of trusting the tail, or you'll debug three-day-old noise.
+- **⚠️ Live-tree hazard:** if the worker is editing files that a daemon/cron/launchd job executes on a schedule, a mid-write import can crash the live process. Either have the worker stage as `*.new` files you install after validation, or park the last committed version over the boot window (snapshot the WIP → `git checkout -- file` → boot passes → restore).
