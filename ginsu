@@ -5,10 +5,14 @@
 # can watch. Claude can drive Codex; Codex can drive Claude. The orchestrator
 # sends prompts, the worker acts in the repo, and replies come back cleanly.
 #
-#   ginsu spawn  <worker> <repo> [--engine E] open a visible codex|claude worker
+#   ginsu spawn  <worker> <repo> [flags]      open a visible codex|claude worker
+#         flags: --engine codex|claude   --effort E  (worker default)
+#                --model <name>  (worker default)
 #   ginsu send   <worker> "<prompt>" [flags]  send a prompt; WAITS and prints the reply
-#         flags: --no-wait  fire-and-forget    --effort low|medium|high|xhigh|max  (this turn)
-#                --model <name>  (this turn)
+#         flags: --no-wait  fire-and-forget (prints the ticket; collect with `wait`)
+#                --effort low|medium|high|xhigh|max  (this turn)   --model <name>  (this turn)
+#   ginsu wait   <worker> [ticket]            wait for a queued turn and print its reply
+#                                             (defaults to the newest ticket; idempotent)
 #   ginsu review <worker> [focus]             adversarial code review of the repo (a mode)
 #   ginsu test   <worker> [focus]             write + run tests for the current changes (a mode)
 #   ginsu read   <worker>                      print the worker's latest reply
@@ -351,18 +355,22 @@ spawn)
   if [ "$depth" -gt 0 ] && [ "${GINSU_ALLOW_NESTED:-0}" != 1 ]; then
     die "nested workers are disabled (already at depth $depth); set GINSU_ALLOW_NESTED=1 only when the user explicitly wants another layer"
   fi
-  worker="${1:?usage: ginsu spawn <worker> <repo> [--engine codex|claude]}"; repo_arg="${2:?need repo path}"; shift 2
-  engine="$ENGINE_DEFAULT"
+  worker="${1:?usage: ginsu spawn <worker> <repo> [--engine codex|claude] [--effort E] [--model M]}"; repo_arg="${2:?need repo path}"; shift 2
+  engine="$ENGINE_DEFAULT"; effort_flag=""; model_flag=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --engine|--backend) engine="${2:?$1 needs codex or claude}"; shift;;
+      --effort) effort_flag="${2:?--effort needs a value}"; shift;;
+      --model)  model_flag="${2:?--model needs a value}"; shift;;
       *) die "unknown spawn flag '$1'";;
     esac; shift
   done
   valid_engine "$engine" || die "bad engine '$engine' (use codex|claude)"
   valid_worker "$worker" || die "bad worker name '$worker' — letters, digits, '_' and '-' only"
   repo="$(cd "$repo_arg" 2>/dev/null && pwd)" || die "no such repo: $repo_arg"
-  model="$(model_for "$engine")"
+  # Flags become the worker's persisted defaults; env vars remain the fallback.
+  [ -n "$effort_flag" ] && EFFORT="$effort_flag"
+  model="${model_flag:-$(model_for "$engine")}"
   PY="$(command -v python3 || command -v python || true)"
   [ -n "$PY" ] || die "ginsu needs python3 (or python) on PATH for the worker window"
   d="$(w_dir "$worker")"
@@ -427,10 +435,12 @@ _loop)  # internal: the worker loop, runs inside the visible terminal
   printf '  \033[2msecurity\033[0m %s\n' "$(security_label "$engine")"
   printf '\033[38;5;240m%s\033[0m\n' "$rule"
   printf '\033[2m  waiting for prompts…\033[0m\n'
+  rm -f "$d/current"   # a stale marker from a killed loop must not survive
   while true; do
     t="$(ls "$d/queue" 2>/dev/null | sort -n | head -1)"
     if [ -z "$t" ]; then sleep 0.2; continue; fi
     prompt="$(cat "$d/queue/$t")"; rm -f "$d/queue/$t"
+    echo "$t" > "$d/current"
     eff="$EFFORT"; mdl="$MODEL"
     if [ -f "$d/meta/$t" ]; then read -r me mm < "$d/meta/$t" || true
       [ -n "${me:-}" ] && [ "$me" != - ] && eff="$me"
@@ -483,6 +493,7 @@ _loop)  # internal: the worker loop, runs inside the visible terminal
       printf '\033[38;5;203m✗ %s turn failed (exit %s) — see %s\033[0m\n' "$engine" "$rc" "$(basename "$errfile")"
     fi
     echo $(( n + 1 )) > "$d/turn"
+    echo "$t" > "$d/last"; rm -f "$d/current"
     prune_done "$d"
   done
   ;;
@@ -508,14 +519,38 @@ send)
   if [ "$eff" != - ] || [ "$mdl" != - ]; then printf '%s %s\n' "$eff" "$mdl" > "$d/meta/$t"; fi
   printf '%s' "$prompt" > "$d/queue/.$t.tmp"; mv "$d/queue/.$t.tmp" "$d/queue/$t"
   if [ "$wait" = 1 ]; then
+    # Results stay in done/ (prune ages them out), so a reply can be re-read
+    # later with `ginsu wait` — collection is idempotent, never destructive.
     for _ in $(seq 1 $(( TIMEOUT * 4 )) ); do
-      if [ -f "$d/done/$t.st" ]; then st="$(cat "$d/done/$t.st")"; cat "$d/done/$t"; rm -f "$d/done/$t" "$d/done/$t.st"; exit "${st:-1}"; fi
+      if [ -f "$d/done/$t.st" ]; then st="$(cat "$d/done/$t.st")"; cat "$d/done/$t"; exit "${st:-1}"; fi
       if ! worker_alive "$d"; then die "worker '$worker' died mid-turn — check the window / ginsu logs $worker"; fi
       sleep 0.25
     done
-    die "timed out after ${TIMEOUT}s waiting for '$worker' (ticket $t) — ginsu tail $worker; ginsu logs $worker may explain (raise GINSU_TIMEOUT for long tasks)"
+    die "timed out after ${TIMEOUT}s waiting for '$worker' (ticket $t) — the worker keeps cutting; collect later with: ginsu wait $worker $t   (raise GINSU_TIMEOUT for long tasks)"
   fi
-  echo "queued → $worker (ticket $t)"
+  echo "queued → $worker (ticket $t)   collect with: ginsu wait $worker $t"
+  ;;
+
+wait)
+  worker="${1:?usage: ginsu wait <worker> [ticket]}"; d="$(w_dir "$worker")"; [ -d "$d" ] || die "no worker '$worker' — ginsu spawn it first"
+  seq_now="$(cat "$d/seq" 2>/dev/null || echo 0)"
+  t="${2:-$seq_now}"
+  case "$t" in ''|*[!0-9]*) die "bad ticket '$t' — tickets are numbers";; esac
+  [ "$t" -ge 1 ] || die "no tickets yet for '$worker'"
+  [ "$t" -le "$seq_now" ] || die "no such ticket $t (latest is $seq_now)"
+  for _ in $(seq 1 $(( TIMEOUT * 4 )) ); do
+    # Read `last` BEFORE probing the result: the loop writes done/$t.st strictly
+    # before last, so if last ≥ t here, the .st probe below is authoritative —
+    # probing first would race a completion into a false "pruned".
+    last="$(cat "$d/last" 2>/dev/null || echo 0)"
+    if [ -f "$d/done/$t.st" ]; then st="$(cat "$d/done/$t.st")"; cat "$d/done/$t" 2>/dev/null; exit "${st:-1}"; fi
+    # Completed strictly in order: a ticket at or below the last finished one
+    # whose result file is gone was pruned — waiting would hang forever.
+    [ "$t" -le "$last" ] && die "ticket $t finished but its result was pruned (only the newest ~30 are kept)"
+    if ! worker_alive "$d"; then die "worker '$worker' died before finishing ticket $t — ginsu logs $worker"; fi
+    sleep 0.25
+  done
+  die "timed out after ${TIMEOUT}s waiting for ticket $t — still queued or running; try again or raise GINSU_TIMEOUT"
   ;;
 
 review)
@@ -534,8 +569,15 @@ diff)  worker="${1:?}"; r="$(cat "$(w_dir "$worker")/repo")"; git -C "$r" --no-p
         if git -C "$r" rev-parse -q --verify HEAD >/dev/null 2>&1; then git -C "$r" --no-pager diff HEAD; else git -C "$r" --no-pager diff; fi;;
 tail)  worker="${1:?}"; d="$(w_dir "$worker")"; qd="$(ls "$d/queue" 2>/dev/null | wc -l | tr -d ' ')"; \
         echo "engine=$(engine_for "$d") turn=$(cat "$d/turn" 2>/dev/null) queued=$qd session=$(cat "$d/session.id" 2>/dev/null)"; echo '--- last reply ---'; cat "$d/response.out" 2>/dev/null;;
-status) worker="${1:?}"; d="$(w_dir "$worker")"; \
-        if worker_alive "$d"; then echo "$worker: RUNNING engine=$(engine_for "$d") (pid $(cat "$d/pid")) repo=$(cat "$d/repo") turn=$(cat "$d/turn")"; else echo "$worker: stopped engine=$(engine_for "$d")"; fi;;
+status) worker="${1:?}"; d="$(w_dir "$worker")"; [ -d "$d" ] || die "no worker '$worker'"
+        cur="$(cat "$d/current" 2>/dev/null)"; last="$(cat "$d/last" 2>/dev/null)"
+        lastst=""; [ -n "$last" ] && lastst="$(cat "$d/done/$last.st" 2>/dev/null)"
+        qtickets="$(ls "$d/queue" 2>/dev/null | sort -n | tr '\n' ' ' | sed 's/ $//')"
+        if worker_alive "$d"; then echo "$worker: RUNNING engine=$(engine_for "$d") (pid $(cat "$d/pid")) repo=$(cat "$d/repo")"
+        else echo "$worker: stopped engine=$(engine_for "$d")"; fi
+        echo "  model=$(cat "$d/model" 2>/dev/null) effort=$(cat "$d/effort" 2>/dev/null) sandbox=$(cat "$d/sandbox" 2>/dev/null) turns=$(cat "$d/turn" 2>/dev/null || echo 0)"
+        echo "  working=${cur:-idle} queued=${qtickets:-none} last=${last:--}${lastst:+ (exit $lastst)}"
+        ;;
 list)  for d in "$ROOT"/*/; do [ -d "$d" ] || continue; w="$(basename "$d")"; \
         worker_alive "$d" && echo "● $w  RUNNING  $(engine_for "$d")  $(cat "$d/repo")" || echo "○ $w  stopped  $(engine_for "$d")"; done;;
 stop)  worker="${1:?}"; d="$(w_dir "$worker")"; tt="$(cat "$d/tty" 2>/dev/null)"; term="$(cat "$d/term" 2>/dev/null || echo auto)"; \
@@ -550,6 +592,6 @@ restart) worker="${1:?usage: ginsu restart <worker>}"; d="$(w_dir "$worker")"; \
         export GINSU_MODEL="$model" GINSU_EFFORT="$effort" GINSU_SANDBOX="$sandbox" GINSU_CLAUDE_PERMISSION_MODE="$permission"; \
         if [ "$engine" = claude ]; then export GINSU_CLAUDE="$cli"; else export GINSU_CODEX="$cli"; fi; \
         exec "$SELF" spawn "$worker" "$repo" --engine "$engine";;
-version|-v|--version) echo "ginsu 2.0.0";;
+version|-v|--version) echo "ginsu 2.1.0";;
 *) sed -n '2,/^set -uo pipefail$/p' "$0" | sed '$d; s/^# \{0,1\}//';;
 esac

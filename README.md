@@ -32,26 +32,36 @@ ginsu send  dev "audit the auth flow, don't commit"
 ginsu spawn reviewer ~/another-repo --engine claude
 ginsu send  reviewer "review the current changes for real failure modes"
 
+# Spawn with sticky defaults — every turn inherits them, no per-send flags
+ginsu spawn heavy ~/my-repo --effort xhigh --model gpt-5.6-sol
+
 # Both engines use the same control surface
 ginsu send  dev "now fix the bug you found"        # resumes the session
 ginsu send  dev "trace the race" --effort xhigh   # per-turn override
 ginsu review dev
 ginsu diff  dev
+
+# Fire-and-forget, then collect — built for orchestrators with command timeouts
+ginsu send dev "refactor the auth flow" --no-wait   # prints: queued → dev (ticket 7)
+ginsu status dev                                    # working=7 queued=none last=6 (exit 0)
+ginsu wait dev 7                                    # blocks, prints the reply, exits with turn status
 ```
 
-`ginsu send` blocks and prints the reply for its own queued ticket. It exits nonzero when the turn fails or times out, so an orchestrating agent never mistakes a stale response for success.
+`ginsu send` blocks and prints the reply for its own queued ticket. It exits nonzero when the turn fails or times out, so an orchestrating agent never mistakes a stale response for success. A timed-out send loses only the wait, never the work — collect the reply later with `ginsu wait` (replies stay re-readable until pruned; only the newest ~30 are kept).
 
 | command | what it does |
 |---|---|
-| `ginsu spawn <worker> <repo> [--engine codex\|claude]` | open a visible worker; Codex is the default |
+| `ginsu spawn <worker> <repo> [--engine codex\|claude] [--effort E] [--model M]` | open a visible worker; flags persist as its defaults |
 | `ginsu send <worker> "<prompt>" [--no-wait] [--effort E] [--model M]` | queue a prompt and normally wait for its reply |
+| `ginsu wait <worker> [ticket]` | wait for a queued turn (newest by default) and print its reply; idempotent |
 | `ginsu review <worker> [focus]` | request an adversarial repository review |
 | `ginsu test <worker> [focus]` | request focused tests for current changes |
 | `ginsu restart <worker>` | reopen the saved engine and repository with a fresh session |
 | `ginsu read <worker>` | print the latest reply |
 | `ginsu diff <worker>` | show repository status and diff |
 | `ginsu logs <worker> [n]` | show the active backend's stderr |
-| `ginsu list` / `status` / `tail` / `stop` | manage workers |
+| `ginsu status <worker>` | liveness, model/effort defaults, current ticket, queue, last result |
+| `ginsu list` / `tail` / `stop` | manage workers |
 
 Prompts are queued per worker. Rapid or concurrent sends never clobber one another, and each caller receives the reply tied to its own ticket. Ginsu allows one active worker per repository.
 

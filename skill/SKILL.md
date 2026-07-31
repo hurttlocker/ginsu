@@ -16,12 +16,17 @@ Use `ginsu` to keep the current agent as orchestrator while a visible worker act
 ## Run the loop
 
 ```bash
-ginsu spawn <worker> <repo> --engine codex|claude
+ginsu spawn <worker> <repo> --engine codex|claude [--effort E] [--model M]   # flags persist as the worker's defaults
 ginsu send <worker> "<bounded prompt>"
 ginsu send <worker> "<follow-up prompt>"
+ginsu send <worker> "<long build task>" --no-wait   # prints the ticket immediately
+ginsu wait <worker> [ticket]                        # collect the reply (newest by default); idempotent
+ginsu status <worker>                               # model/effort defaults, current ticket, queue, last result
 ginsu diff <worker>
 ginsu stop <worker>
 ```
+
+Set the worker's effort/model once at spawn instead of repeating per-send flags. For tasks longer than your harness's command timeout, prefer `send --no-wait` + `ginsu wait` over background-shell workarounds — a timed-out blocking send loses only the wait, never the work, and `wait` re-attaches cleanly.
 
 Treat `ginsu send` as a blocking tool call that returns the reply for its own queued ticket. Give the worker the repository context, exact task, constraints, and completion criteria.
 
@@ -48,7 +53,7 @@ Read the single `ginsu` Bash file before changing it. Keep Codex sandbox flags o
 
 ## Field lessons (from production dogfooding)
 
-- **Long build turns outlive the default wait.** `ginsu send` gives up at `GINSU_TIMEOUT` (900s default) — but the worker keeps cutting; a timed-out send loses only the wait, never the work. Raise it per-send for build-sized tasks (`GINSU_TIMEOUT=1800 ginsu send …`). To re-attach after a timeout: poll `$GINSU_HOME/<worker>/done/<ticket>.st` (send printed the ticket) and read `response.out` when it appears — the `.st` file holds the turn's exit code.
+- **Long build turns outlive the default wait.** `ginsu send` gives up at `GINSU_TIMEOUT` (900s default) — but the worker keeps cutting; a timed-out send loses only the wait, never the work. Raise it per-send for build-sized tasks (`GINSU_TIMEOUT=1800 ginsu send …`), or skip the gamble: `send --no-wait` then `ginsu wait <worker> <ticket>` re-attaches to the turn's own reply and exit status, and stays re-readable if you need it twice.
 - **Queue while it works.** Sends queue in ticket order, so you can fire an amendment mid-turn and the worker course-corrects on its next turn — no need to wait out the current turn before refining the spec.
 - **Worker stderr accumulates across turns**, and every backend boot dumps MCP-auth chatter into it — when a turn fails, grep near the failure's timeframe instead of trusting the tail, or you'll debug three-day-old noise.
 - **⚠️ Live-tree hazard:** if the worker is editing files that a daemon/cron/launchd job executes on a schedule, a mid-write import can crash the live process. Either have the worker stage as `*.new` files you install after validation, or park the last committed version over the boot window (snapshot the WIP → `git checkout -- file` → boot passes → restore).

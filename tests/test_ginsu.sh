@@ -85,6 +85,13 @@ COMMON=(
   GINSU_CODEX="$TMP/bin/codex"
   GINSU_CLAUDE="$TMP/bin/claude"
   GINSU_TIMEOUT=20
+  # Pin every behavior knob: the harness must not inherit the operator's
+  # ambient GINSU_* config (a real bypass-user's env broke these tests once).
+  GINSU_SANDBOX=write
+  GINSU_EFFORT=high
+  GINSU_MODEL=
+  GINSU_ENGINE=codex
+  GINSU_CLAUDE_PERMISSION_MODE=acceptEdits
 )
 
 g() { env "${COMMON[@]}" "$GINSU" "$@"; }
@@ -93,7 +100,7 @@ assert_eq() { [ "$1" = "$2" ] || fail "expected '$2', got '$1'"; }
 assert_has() { grep -F -- "$2" "$1" >/dev/null || fail "$1 does not contain $2"; }
 
 bash -n "$GINSU"
-assert_eq "$(g --version)" "ginsu 2.0.0"
+assert_eq "$(g --version)" "ginsu 2.1.0"
 
 g spawn "$CW" "$TMP/repo" --engine codex >/dev/null
 assert_eq "$(g send "$CW" first)" "codex:first:first"
@@ -111,6 +118,43 @@ assert_has "$TMP/fail.out" "codex turn failed (exit 23)"
 if g send "$CW" softfail > "$TMP/fail.out" 2>&1; then fail "Codex stream error returned success"; fi
 assert_has "$TMP/fail.out" "fake codex stream error"
 assert_eq "$(g send "$CW" recovered)" "codex:resume:recovered"
+
+# --- async send + idempotent wait ---
+q="$(g send "$CW" async1 --no-wait)"
+ticket="$(printf '%s' "$q" | sed -n 's/.*ticket \([0-9]*\).*/\1/p' | head -1)"
+[ -n "$ticket" ] || fail "--no-wait did not print a ticket: $q"
+assert_eq "$(g wait "$CW" "$ticket")" "codex:resume:async1"
+assert_eq "$(g wait "$CW" "$ticket")" "codex:resume:async1"   # idempotent re-read
+g send "$CW" async2 --no-wait >/dev/null
+assert_eq "$(g wait "$CW")" "codex:resume:async2"             # defaults to newest ticket
+q="$(g send "$CW" fail --no-wait)"
+ticket="$(printf '%s' "$q" | sed -n 's/.*ticket \([0-9]*\).*/\1/p' | head -1)"
+if g wait "$CW" "$ticket" > "$TMP/wait-fail.out" 2>&1; then fail "wait on a failed turn returned success"; fi
+assert_has "$TMP/wait-fail.out" "codex turn failed (exit 23)"
+if g wait "$CW" 99999 > "$TMP/wait-bad.out" 2>&1; then fail "wait accepted a future ticket"; fi
+assert_has "$TMP/wait-bad.out" "no such ticket"
+
+# --- status: defaults + queue visibility ---
+g status "$CW" > "$TMP/status.out"
+assert_has "$TMP/status.out" "RUNNING"
+assert_has "$TMP/status.out" "effort=high"
+assert_has "$TMP/status.out" "working=idle"
+assert_has "$TMP/status.out" "queued=none"
+
+# --- spawn --effort/--model persist as worker defaults ---
+mkdir -p "$TMP/repo2"; git -C "$TMP/repo2" init -q
+FW="flags_$$"
+g spawn "$FW" "$TMP/repo2" --engine codex --effort xhigh --model fake-xl >/dev/null
+assert_eq "$(cat "$TMP/home/$FW/effort")" "xhigh"
+assert_eq "$(cat "$TMP/home/$FW/model")" "fake-xl"
+assert_eq "$(g send "$FW" flagcheck)" "codex:first:flagcheck"
+assert_has "$TMP/bin/codex.args" 'model_reasoning_effort="xhigh"'
+assert_has "$TMP/bin/codex.args" "-m fake-xl"
+g status "$FW" > "$TMP/status2.out"
+assert_has "$TMP/status2.out" "model=fake-xl"
+assert_has "$TMP/status2.out" "effort=xhigh"
+g stop "$FW" >/dev/null
+tmux kill-session -t "ginsu-$FW" 2>/dev/null || true
 
 g restart "$CW" >/dev/null
 assert_eq "$(cat "$TMP/home/$CW/engine")" codex
