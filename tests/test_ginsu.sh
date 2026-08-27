@@ -41,6 +41,9 @@ done
 if [ "$mode" = resume ] && [ "$has_sandbox" = 1 ]; then echo "resume received unsupported --sandbox" >&2; exit 64; fi
 if [ "$prompt" = fail ]; then echo "fake codex failure" >&2; exit 23; fi
 [ "$prompt" = slow ] && sleep 0.3
+# A turn that forks a grandchild and keeps going — the shape of a worker that outlives its wrapper.
+# The grandchild ignores HUP: closing the pane/window must not be what kills it, only stop's tree-kill.
+if [ "$prompt" = hang ]; then ( trap '' HUP; exec sleep 3617 ) & sleep 30; exit 0; fi
 reply="codex:$mode:$prompt"
 python3 - "$reply" "$out" "$mode" "$prompt" <<'PY'
 import json, sys
@@ -100,7 +103,7 @@ assert_eq() { [ "$1" = "$2" ] || fail "expected '$2', got '$1'"; }
 assert_has() { grep -F -- "$2" "$1" >/dev/null || fail "$1 does not contain $2"; }
 
 bash -n "$GINSU"
-assert_eq "$(g --version)" "ginsu 2.1.0"
+assert_eq "$(g --version)" "ginsu 2.1.1"
 
 g spawn "$CW" "$TMP/repo" --engine codex >/dev/null
 assert_eq "$(g send "$CW" first)" "codex:first:first"
@@ -159,7 +162,14 @@ tmux kill-session -t "ginsu-$FW" 2>/dev/null || true
 g restart "$CW" >/dev/null
 assert_eq "$(cat "$TMP/home/$CW/engine")" codex
 assert_eq "$(g send "$CW" restarted)" "codex:first:restarted"
-g stop "$CW" >/dev/null
+
+# stop must take the whole tree and verify it: a grandchild that survived a "stopped" worker
+# once finished its turn and committed to the repo after the operator was told it was dead.
+g send "$CW" hang --no-wait >/dev/null
+for _ in $(seq 1 50); do pgrep -f 'sleep 3617' >/dev/null && break; sleep 0.1; done
+pgrep -f 'sleep 3617' >/dev/null || fail "hang fixture never forked its grandchild"
+assert_eq "$(g stop "$CW")" "stopped $CW"
+if pgrep -f 'sleep 3617' >/dev/null; then pkill -f 'sleep 3617'; fail "stop reported success but the worker's grandchild survived"; fi
 
 g spawn "$HW" "$TMP/repo" --engine claude >/dev/null
 assert_eq "$(g send "$HW" first)" "claude:first:first"
@@ -190,4 +200,4 @@ env "${COMMON[@]}" "$GINSU" send "$HB" bypassmode >/dev/null
 assert_has "$TMP/bin/claude.args" "--dangerously-skip-permissions"
 env "${COMMON[@]}" "$GINSU" stop "$HB" >/dev/null
 
-echo "PASS: both engines, resume, queue tickets, failures, restart, security mappings, and nesting guard"
+echo "PASS: both engines, resume, queue tickets, failures, restart, verified stop, security mappings, and nesting guard"

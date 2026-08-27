@@ -68,6 +68,37 @@ security_label(){
 valid_worker(){ case "$1" in ''|*[!A-Za-z0-9_-]*) return 1;; *) return 0;; esac; }
 # alive only if the pid is running AND is actually a ginsu loop (guards PID reuse)
 worker_alive(){ local p; p="$(cat "$1/pid" 2>/dev/null)" || return 1; [ -n "$p" ] && kill -0 "$p" 2>/dev/null && ps -p "$p" -o command= 2>/dev/null | grep -q ginsu; }
+# Every pid under a root, root included (space-separated). pgrep -P walk; no pgid assumptions.
+proc_tree(){
+  local -a q; q=("$1"); local i=0 seen=" " p kid
+  while [ "$i" -lt "${#q[@]}" ]; do
+    p="${q[$i]}"; i=$((i+1))
+    case "$seen" in *" $p "*) continue;; esac
+    seen="$seen$p "
+    for kid in $(pgrep -P "$p" 2>/dev/null); do q+=("$kid"); done
+  done
+  printf '%s' "$seen"
+}
+alive_pids(){ local p out=""; for p in $1; do kill -0 "$p" 2>/dev/null && out="$out$p "; done; printf '%s' "$out"; }
+# Stop the wrapper AND everything under it, then VERIFY. Killing the one recorded pid and
+# printing "stopped" let a Codex turn outlive its wrapper and commit afterwards (2026-08-27):
+# the recorded pid is the loop, the engine is its child, and a dead loop proves nothing.
+# Returns 0 only when every snapshotted pid is gone; otherwise prints the survivors, returns 1.
+stop_tree(){
+  local root="$1" pids sig p i left pgid
+  pids="$(proc_tree "$root")"
+  # A wrapper that leads its own process group (Terminal/tmux job) takes the group signal too,
+  # which catches a child forked between the snapshot and the kill. Never when it shares ours.
+  pgid="$(ps -o pgid= -p "$root" 2>/dev/null | tr -d ' ')"
+  for sig in TERM KILL; do
+    [ "$pgid" = "$root" ] && kill "-$sig" -- "-$root" 2>/dev/null
+    for p in $pids; do kill "-$sig" "$p" 2>/dev/null; done
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+      left="$(alive_pids "$pids")"; [ -z "$left" ] && return 0; sleep 0.2
+    done
+  done
+  printf '%s' "$left"; return 1
+}
 # best-effort: close the Terminal/iTerm window whose tty matches (never launches an app)
 close_window(){
   local t="$1"; { [ -n "$t" ] && [ "$(uname)" = Darwin ]; } || return 0
@@ -581,17 +612,21 @@ status) worker="${1:?}"; d="$(w_dir "$worker")"; [ -d "$d" ] || die "no worker '
 list)  for d in "$ROOT"/*/; do [ -d "$d" ] || continue; w="$(basename "$d")"; \
         worker_alive "$d" && echo "● $w  RUNNING  $(engine_for "$d")  $(cat "$d/repo")" || echo "○ $w  stopped  $(engine_for "$d")"; done;;
 stop)  worker="${1:?}"; d="$(w_dir "$worker")"; tt="$(cat "$d/tty" 2>/dev/null)"; term="$(cat "$d/term" 2>/dev/null || echo auto)"; \
-        kill "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null && echo "stopped $worker" || echo "$worker not running"; \
-        tmux kill-session -t "ginsu-$worker" 2>/dev/null || true; [ "$term" = tmux ] || close_window "$tt";;
+        rc=0; p="$(cat "$d/pid" 2>/dev/null || true)"; \
+        if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then \
+          if left="$(stop_tree "$p")"; then echo "stopped $worker"; \
+          else echo "ginsu: stop UNCONFIRMED for $worker — still alive: $left" >&2; rc=1; fi; \
+        else echo "$worker not running"; fi; \
+        tmux kill-session -t "ginsu-$worker" 2>/dev/null || true; [ "$term" = tmux ] || close_window "$tt"; exit "$rc";;
 restart) worker="${1:?usage: ginsu restart <worker>}"; d="$(w_dir "$worker")"; \
         repo="$(cat "$d/repo" 2>/dev/null)" || die "no worker '$worker' — ginsu spawn it first"; \
         engine="$(engine_for "$d")"; model="$(cat "$d/model" 2>/dev/null || model_for "$engine")"; \
         effort="$(cat "$d/effort" 2>/dev/null || echo "$EFFORT")"; sandbox="$(cat "$d/sandbox" 2>/dev/null || echo "$SANDBOX")"; \
         permission="$(cat "$d/claude.permission" 2>/dev/null || echo "$CLAUDE_WRITE_MODE")"; cli="$(cat "$d/cli" 2>/dev/null || true)"; \
-        worker_alive "$d" && "$SELF" stop "$worker"; \
+        if worker_alive "$d"; then "$SELF" stop "$worker" || die "refusing to restart '$worker': the old worker could not be confirmed stopped"; fi; \
         export GINSU_MODEL="$model" GINSU_EFFORT="$effort" GINSU_SANDBOX="$sandbox" GINSU_CLAUDE_PERMISSION_MODE="$permission"; \
         if [ "$engine" = claude ]; then export GINSU_CLAUDE="$cli"; else export GINSU_CODEX="$cli"; fi; \
         exec "$SELF" spawn "$worker" "$repo" --engine "$engine";;
-version|-v|--version) echo "ginsu 2.1.0";;
+version|-v|--version) echo "ginsu 2.1.1";;
 *) sed -n '2,/^set -uo pipefail$/p' "$0" | sed '$d; s/^# \{0,1\}//';;
 esac
