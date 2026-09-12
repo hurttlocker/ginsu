@@ -9,6 +9,7 @@ CW="codex_$$"
 HW="claude_$$"
 HR="claude_read_$$"
 HB="claude_bypass_$$"
+RW="release_$$"
 
 cleanup() {
   if [ "${KEEP_TMP:-0}" = 1 ]; then
@@ -19,6 +20,7 @@ cleanup() {
   tmux kill-session -t "ginsu-$HW" 2>/dev/null || true
   tmux kill-session -t "ginsu-$HR" 2>/dev/null || true
   tmux kill-session -t "ginsu-$HB" 2>/dev/null || true
+  tmux kill-session -t "ginsu-$RW" 2>/dev/null || true
   rm -rf "$BASE"
 }
 trap cleanup EXIT
@@ -171,6 +173,24 @@ pgrep -f 'sleep 3617' >/dev/null || fail "hang fixture never forked its grandchi
 assert_eq "$(g stop "$CW")" "stopped $CW"
 if pgrep -f 'sleep 3617' >/dev/null; then pkill -f 'sleep 3617'; fail "stop reported success but the worker's grandchild survived"; fi
 
+# A worker stopped mid-turn once left its ticket marker behind, and release refused forever with
+# "working on ticket N" even though nothing was running. stop clears the marker; release treats a
+# marker on a dead worker as stale, still protects queued tickets, and --force discards them.
+git -C "$TMP/repo" commit -q --allow-empty -m base
+git -C "$TMP/repo" worktree add -q "$TMP/wt-release" -b release-case
+g spawn "$RW" "$TMP/wt-release" --engine codex >/dev/null
+g send "$RW" hang --no-wait >/dev/null
+for _ in $(seq 1 50); do pgrep -f 'sleep 3617' >/dev/null && break; sleep 0.1; done
+g send "$RW" queued-after --no-wait >/dev/null
+assert_eq "$(g stop "$RW")" "stopped $RW"
+if [ -f "$TMP/home/$RW/current" ]; then fail "stop left the current ticket marker behind"; fi
+echo 9 > "$TMP/home/$RW/current"
+if g release "$RW" > "$TMP/release.out" 2>&1; then fail "release discarded a queued ticket without --force"; fi
+assert_has "$TMP/release.out" "marker is stale"
+assert_has "$TMP/release.out" "queued ticket"
+assert_eq "$(g release "$RW" --force 2>/dev/null)" "released $RW: removed worktree $TMP/wt-release (branch left in place)"
+if [ -d "$TMP/wt-release" ]; then fail "release --force left the worktree in place"; fi
+
 g spawn "$HW" "$TMP/repo" --engine claude >/dev/null
 assert_eq "$(g send "$HW" first)" "claude:first:first"
 assert_eq "$(g send "$HW" second)" "claude:resume:second"
@@ -200,4 +220,4 @@ env "${COMMON[@]}" "$GINSU" send "$HB" bypassmode >/dev/null
 assert_has "$TMP/bin/claude.args" "--dangerously-skip-permissions"
 env "${COMMON[@]}" "$GINSU" stop "$HB" >/dev/null
 
-echo "PASS: both engines, resume, queue tickets, failures, restart, verified stop, security mappings, and nesting guard"
+echo "PASS: both engines, resume, queue tickets, failures, restart, verified stop, stale-marker release, security mappings, and nesting guard"

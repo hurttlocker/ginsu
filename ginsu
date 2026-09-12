@@ -21,8 +21,9 @@
 #   ginsu tail   <worker>                      turn count, queue depth, session id, last reply
 #   ginsu restart <worker>                    stop and spawn the worker again in its saved repo
 #   ginsu release <worker> [--force]          stop an IDLE worker and remove its git worktree
-#                                             (refuses while a turn is working or queued; --force
-#                                             discards uncommitted changes)
+#                                             (refuses while a turn is working or queued; a marker left by a
+#                                             dead worker is cleared; --force also discards queued tickets
+#                                             and uncommitted changes)
 #   ginsu list   |  ginsu status <worker>  |  ginsu stop <worker>
 #
 # `send` returns the worker's reply as text and EXITS NONZERO if the turn failed or
@@ -617,15 +618,19 @@ list)  for d in "$ROOT"/*/; do [ -d "$d" ] || continue; w="$(basename "$d")"; \
 stop)  worker="${1:?}"; d="$(w_dir "$worker")"; tt="$(cat "$d/tty" 2>/dev/null)"; term="$(cat "$d/term" 2>/dev/null || echo auto)"; \
         rc=0; p="$(cat "$d/pid" 2>/dev/null || true)"; \
         if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then \
-          if left="$(stop_tree "$p")"; then echo "stopped $worker"; \
+          if left="$(stop_tree "$p")"; then rm -f "$d/current"; echo "stopped $worker"; \
           else echo "ginsu: stop UNCONFIRMED for $worker — still alive: $left" >&2; rc=1; fi; \
         else echo "$worker not running"; fi; \
         tmux kill-session -t "ginsu-$worker" 2>/dev/null || true; [ "$term" = tmux ] || close_window "$tt"; exit "$rc";;
 release) worker="${1:?usage: ginsu release <worker> [--force]}"; force=0; [ "${2:-}" = --force ] && force=1; \
         d="$(w_dir "$worker")"; [ -d "$d" ] || die "no worker '$worker'"; repo="$(cat "$d/repo" 2>/dev/null)"; \
         cur="$(cat "$d/current" 2>/dev/null)"; qd="$(ls "$d/queue" 2>/dev/null | wc -l | tr -d ' ')"; \
+        if [ -n "$cur" ] && ! worker_alive "$d"; then \
+          echo "ginsu: $worker is not running; ticket $cur marker is stale, clearing it" >&2; rm -f "$d/current"; cur=""; fi; \
         [ -z "$cur" ] || die "refusing: $worker is working on ticket $cur — wait for it or ginsu stop it deliberately"; \
-        [ "$qd" = 0 ] || die "refusing: $worker has $qd queued ticket(s)"; \
+        if [ "$qd" != 0 ]; then \
+          if [ "$force" = 1 ]; then echo "ginsu: discarding $qd queued ticket(s) for $worker" >&2; rm -f "$d"/queue/*; \
+          else die "refusing: $worker has $qd queued ticket(s) — send them elsewhere, or pass --force to discard"; fi; fi; \
         if worker_alive "$d"; then "$SELF" stop "$worker" || die "refusing to release '$worker': could not confirm it stopped"; fi; \
         [ -d "$repo" ] || { echo "released $worker (repo dir already gone)"; exit 0; }; \
         gitfile="$repo/.git"; [ -f "$gitfile" ] || die "refusing: $repo is not a linked git worktree (.git is not a file); remove it yourself"; \
