@@ -57,6 +57,7 @@ ginsu wait dev 7                                    # blocks, prints the reply, 
 | `ginsu review <worker> [focus]` | request an adversarial repository review |
 | `ginsu test <worker> [focus]` | request focused tests for current changes |
 | `ginsu restart <worker>` | reopen the saved engine and repository with a fresh session |
+- `ginsu release <worker> [--force]` stops an idle worker and removes its linked git worktree. It refuses while a turn is working or queued, and refuses uncommitted changes without `--force`, so cleanup can never destroy a worker's in-flight work.
 | `ginsu read <worker>` | print the latest reply |
 | `ginsu diff <worker>` | show repository status and diff |
 | `ginsu logs <worker> [n]` | show the active backend's stderr |

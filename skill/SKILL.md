@@ -24,6 +24,7 @@ ginsu wait <worker> [ticket]                        # collect the reply (newest 
 ginsu status <worker>                               # model/effort defaults, current ticket, queue, last result
 ginsu diff <worker>
 ginsu stop <worker>
+ginsu release <worker> [--force]   # stop an idle worker and remove its git worktree; refuses while working/queued or dirty
 ```
 
 Set the worker's effort/model once at spawn instead of repeating per-send flags. For tasks longer than your harness's command timeout, prefer `send --no-wait` + `ginsu wait` over background-shell workarounds — a timed-out blocking send loses only the wait, never the work, and `wait` re-attaches cleanly.

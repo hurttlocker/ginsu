@@ -20,6 +20,9 @@
 #   ginsu logs   <worker> [n]                  show the worker CLI's stderr
 #   ginsu tail   <worker>                      turn count, queue depth, session id, last reply
 #   ginsu restart <worker>                    stop and spawn the worker again in its saved repo
+#   ginsu release <worker> [--force]          stop an IDLE worker and remove its git worktree
+#                                             (refuses while a turn is working or queued; --force
+#                                             discards uncommitted changes)
 #   ginsu list   |  ginsu status <worker>  |  ginsu stop <worker>
 #
 # `send` returns the worker's reply as text and EXITS NONZERO if the turn failed or
@@ -618,6 +621,20 @@ stop)  worker="${1:?}"; d="$(w_dir "$worker")"; tt="$(cat "$d/tty" 2>/dev/null)"
           else echo "ginsu: stop UNCONFIRMED for $worker — still alive: $left" >&2; rc=1; fi; \
         else echo "$worker not running"; fi; \
         tmux kill-session -t "ginsu-$worker" 2>/dev/null || true; [ "$term" = tmux ] || close_window "$tt"; exit "$rc";;
+release) worker="${1:?usage: ginsu release <worker> [--force]}"; force=0; [ "${2:-}" = --force ] && force=1; \
+        d="$(w_dir "$worker")"; [ -d "$d" ] || die "no worker '$worker'"; repo="$(cat "$d/repo" 2>/dev/null)"; \
+        cur="$(cat "$d/current" 2>/dev/null)"; qd="$(ls "$d/queue" 2>/dev/null | wc -l | tr -d ' ')"; \
+        [ -z "$cur" ] || die "refusing: $worker is working on ticket $cur — wait for it or ginsu stop it deliberately"; \
+        [ "$qd" = 0 ] || die "refusing: $worker has $qd queued ticket(s)"; \
+        if worker_alive "$d"; then "$SELF" stop "$worker" || die "refusing to release '$worker': could not confirm it stopped"; fi; \
+        [ -d "$repo" ] || { echo "released $worker (repo dir already gone)"; exit 0; }; \
+        gitfile="$repo/.git"; [ -f "$gitfile" ] || die "refusing: $repo is not a linked git worktree (.git is not a file); remove it yourself"; \
+        if [ "$force" = 0 ] && [ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ]; then \
+          die "refusing: $repo has uncommitted changes — commit or push them, or pass --force to discard"; fi; \
+        common="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null)"; main="$(dirname "$common")"; \
+        if [ "$force" = 1 ]; then git -C "$main" worktree remove --force "$repo"; else git -C "$main" worktree remove "$repo"; fi \
+          || die "git worktree remove failed for $repo"; \
+        echo "released $worker: removed worktree $repo (branch left in place)";;
 restart) worker="${1:?usage: ginsu restart <worker>}"; d="$(w_dir "$worker")"; \
         repo="$(cat "$d/repo" 2>/dev/null)" || die "no worker '$worker' — ginsu spawn it first"; \
         engine="$(engine_for "$d")"; model="$(cat "$d/model" 2>/dev/null || model_for "$engine")"; \
