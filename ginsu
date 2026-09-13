@@ -423,7 +423,7 @@ spawn)
   mkdir -p "$d"; rm -rf "$d/queue" "$d/meta" "$d/done" "$d/lock"
   rm -f "$d/inbox" "$d/session.id" "$d/response.out" "$d/codex.err" "$d/claude.err"
   mkdir -p "$d/queue" "$d/meta" "$d/done"
-  echo 0 > "$d/turn"; echo 0 > "$d/seq"; echo "$repo" > "$d/repo"; echo "$engine" > "$d/engine"
+  echo 0 > "$d/turn"; echo 0 > "$d/seq"; echo 0 > "$d/last"; rm -f "$d/current"; echo "$repo" > "$d/repo"; echo "$engine" > "$d/engine"
   echo "$model" > "$d/model"; echo "$EFFORT" > "$d/effort"; echo "$SANDBOX" > "$d/sandbox"; echo "$CLAUDE_WRITE_MODE" > "$d/claude.permission"
   echo "$PY" > "$d/python"
   if [ "$engine" = claude ]; then echo "$CLAUDE" > "$d/cli"; else echo "$CODEX" > "$d/cli"; fi
