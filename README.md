@@ -76,6 +76,7 @@ Prompts are queued per worker. Rapid or concurrent sends never clobber one anoth
 | variable | default | notes |
 |---|---|---|
 | `GINSU_ENGINE` | `codex` | default backend; `--engine` overrides it at spawn |
+| `GINSU_CODEX` / `GINSU_CLAUDE` | detected on PATH | CLI path, including a provider wrapper |
 | `GINSU_CODEX_MODEL` | `gpt-5.6-sol` | default Codex model |
 | `GINSU_CLAUDE_MODEL` | `sonnet` | default Claude model |
 | `GINSU_OPENCODE_MODEL` | unset | OpenCode uses its configured model unless set here or at spawn |
@@ -87,6 +88,18 @@ Prompts are queued per worker. Rapid or concurrent sends never clobber one anoth
 | `GINSU_TERM` | `auto` | `iterm·terminal·tmux` |
 | `GINSU_TIMEOUT` | `900` | seconds a blocking send waits |
 | `GINSU_ALLOW_NESTED` | `0` | set to `1` only when the user explicitly authorizes nested workers |
+| `GINSU_DEFAULTS_FILE` | `${XDG_CONFIG_HOME:-$HOME/.config}/ginsu/defaults` | personal routing defaults file |
+
+For personal routing defaults, create `${XDG_CONFIG_HOME:-$HOME/.config}/ginsu/defaults` with plain `KEY=VALUE` lines:
+
+```text
+GINSU_ENGINE=claude
+GINSU_CLAUDE_MODEL=provider/model-id
+GINSU_CLAUDE=/path/to/claude-wrapper
+GINSU_EFFORT=high
+```
+
+The file accepts `GINSU_ENGINE`, `GINSU_EFFORT`, and the `GINSU_CODEX`, `GINSU_CLAUDE`, or `GINSU_OPENCODE` CLI/model keys. Ginsu reads values as text, not shell code. Explicit environment values win over this file, and `spawn --engine`, `--model`, and `--effort` win for that worker. Without a file, the built-in Codex default remains. Keep credentials out of this file; a CLI wrapper can obtain them from the worker environment or a credential store at launch. Set `GINSU_DEFAULTS_FILE` to use another file.
 
 Worker configuration is saved at spawn, so a new Terminal window or an existing tmux server does not need to inherit the caller's environment. `restart` preserves the selected engine, CLI path, model, effort, and security mode.
 

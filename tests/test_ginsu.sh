@@ -13,6 +13,10 @@ OW="opencode_$$"
 OR="opencode_read_$$"
 OB="opencode_bypass_$$"
 RW="release_$$"
+DW="defaults_$$"
+EW="defaults_env_$$"
+FW2="defaults_flags_$$"
+NW="defaults_none_$$"
 
 cleanup() {
   if [ "${KEEP_TMP:-0}" = 1 ]; then
@@ -27,6 +31,10 @@ cleanup() {
   tmux kill-session -t "ginsu-$OR" 2>/dev/null || true
   tmux kill-session -t "ginsu-$OB" 2>/dev/null || true
   tmux kill-session -t "ginsu-$RW" 2>/dev/null || true
+  tmux kill-session -t "ginsu-$DW" 2>/dev/null || true
+  tmux kill-session -t "ginsu-$EW" 2>/dev/null || true
+  tmux kill-session -t "ginsu-$FW2" 2>/dev/null || true
+  tmux kill-session -t "ginsu-$NW" 2>/dev/null || true
   rm -rf "$BASE"
 }
 trap cleanup EXIT
@@ -281,4 +289,53 @@ assert_eq "$(g send "$OB" bypassmode)" "opencode:first:bypassmode"
 assert_has "$TMP/bin/opencode.args" "--agent build --auto"
 g stop "$OB" >/dev/null
 
-echo "PASS: three engines, resume, queue tickets, failures, restart, verified stop, stale-marker release, security mappings, and nesting guard"
+# A personal defaults file applies to CLI launches without changing the
+# built-in defaults or overriding explicit environment/flag selections.
+mkdir -p "$TMP/config/ginsu"
+cat > "$TMP/config/ginsu/defaults" <<EOF
+GINSU_ENGINE=claude
+GINSU_CLAUDE_MODEL=personal-model
+GINSU_CLAUDE=$TMP/bin/claude
+GINSU_EFFORT=low
+EOF
+CONFIG_ENV=(
+  PATH="$PATH"
+  HOME="$HOME"
+  XDG_CONFIG_HOME="$TMP/config"
+  GINSU_HOME="$TMP/home"
+  GINSU_TERM=tmux
+  GINSU_SANDBOX=read
+  GINSU_TIMEOUT=20
+  GINSU_CODEX="$TMP/bin/codex"
+  GINSU_OPENCODE="$TMP/bin/opencode"
+)
+env -i "${CONFIG_ENV[@]}" "$GINSU" spawn "$DW" "$TMP/repo" >/dev/null
+assert_eq "$(cat "$TMP/home/$DW/engine")" claude
+assert_eq "$(cat "$TMP/home/$DW/model")" personal-model
+assert_eq "$(cat "$TMP/home/$DW/cli")" "$TMP/bin/claude"
+assert_eq "$(cat "$TMP/home/$DW/effort")" low
+assert_eq "$(g send "$DW" configured)" "claude:first:configured"
+g stop "$DW" >/dev/null
+
+env -i "${CONFIG_ENV[@]}" GINSU_ENGINE=opencode GINSU_OPENCODE_MODEL=env-model "$GINSU" spawn "$EW" "$TMP/repo" >/dev/null
+assert_eq "$(cat "$TMP/home/$EW/engine")" opencode
+assert_eq "$(cat "$TMP/home/$EW/model")" env-model
+g stop "$EW" >/dev/null
+
+env -i "${CONFIG_ENV[@]}" "$GINSU" spawn "$FW2" "$TMP/repo" --engine codex --model flag-model --effort xhigh >/dev/null
+assert_eq "$(cat "$TMP/home/$FW2/engine")" codex
+assert_eq "$(cat "$TMP/home/$FW2/model")" flag-model
+assert_eq "$(cat "$TMP/home/$FW2/effort")" xhigh
+g stop "$FW2" >/dev/null
+
+env -i "${CONFIG_ENV[@]}" XDG_CONFIG_HOME="$TMP/no-config" "$GINSU" spawn "$NW" "$TMP/repo" >/dev/null
+assert_eq "$(cat "$TMP/home/$NW/engine")" codex
+g stop "$NW" >/dev/null
+
+printf 'GINSU_ENGINE=$(touch "%s/pwned")\n' "$TMP" > "$TMP/config/ginsu/defaults"
+if env -i "${CONFIG_ENV[@]}" "$GINSU" spawn "$DW" "$TMP/repo" > "$TMP/unsafe.out" 2>&1; then
+  fail "config command substitution was accepted"
+fi
+[ ! -e "$TMP/pwned" ] || fail "config file executed shell code"
+
+echo "PASS: three engines, personal defaults, resume, queue tickets, failures, restart, verified stop, stale-marker release, security mappings, and nesting guard"

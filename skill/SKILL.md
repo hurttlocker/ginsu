@@ -9,9 +9,10 @@ Use `ginsu` to keep the current agent as orchestrator while a visible worker act
 
 ## Choose the engine
 
-- From Claude Code, omit `--engine` to use the backward-compatible Codex default.
+- Without personal defaults, omitting `--engine` uses the backward-compatible Codex default.
 - From Codex, pass `--engine claude` to open a visible Claude Code worker.
 - Pass `--engine opencode` for an optional OpenCode worker. Use a provider-qualified model such as `openrouter/stealth/space-bunny-alpha` when selecting an OpenRouter model; otherwise OpenCode uses its configured default.
+- A user's `${XDG_CONFIG_HOME:-$HOME/.config}/ginsu/defaults` may select a personal engine, model, CLI wrapper, and effort. Explicit environment values and spawn flags override those defaults. Check `ginsu status` instead of assuming the built-in Codex default applies.
 - Choose a same-model worker only when the user explicitly wants parallel capacity rather than a cross-model check.
 
 ## Run the loop
