@@ -2,11 +2,11 @@
 # Ginsu — cut the work in half.
 #
 # Let one coding agent spawn and drive the other in a REAL terminal window you
-# can watch. Claude can drive Codex; Codex can drive Claude. The orchestrator
+# can watch. The orchestrator
 # sends prompts, the worker acts in the repo, and replies come back cleanly.
 #
-#   ginsu spawn  <worker> <repo> [flags]      open a visible codex|claude worker
-#         flags: --engine codex|claude   --effort E  (worker default)
+#   ginsu spawn  <worker> <repo> [flags]      open a visible codex|claude|opencode worker
+#         flags: --engine codex|claude|opencode   --effort E  (worker default)
 #                --model <name>  (worker default)
 #   ginsu send   <worker> "<prompt>" [flags]  send a prompt; WAITS and prints the reply
 #         flags: --no-wait  fire-and-forget (prints the ticket; collect with `wait`)
@@ -29,15 +29,17 @@
 # `send` returns the worker's reply as text and EXITS NONZERO if the turn failed or
 # timed out — so a caller can trust the reply or react to the failure. Prompts
 # are queued per worker (no lost prompts), and each reply is tied to its own
-# prompt. Backends are the official Codex and Claude Code CLIs.
+# prompt. Backends are the official Codex, Claude Code, and OpenCode CLIs.
 set -uo pipefail
 
 CODEX="${GINSU_CODEX:-$(command -v codex || echo "$HOME/.npm-global/bin/codex")}"
 CLAUDE="${GINSU_CLAUDE:-$(command -v claude || echo "$HOME/.local/bin/claude")}"
+OPENCODE="${GINSU_OPENCODE:-$(command -v opencode || echo "$HOME/.npm-global/bin/opencode")}"
 ENGINE_DEFAULT="${GINSU_ENGINE:-codex}"
 MODEL_OVERRIDE="${GINSU_MODEL:-}"
 CODEX_MODEL="${MODEL_OVERRIDE:-${GINSU_CODEX_MODEL:-gpt-5.6-sol}}"
 CLAUDE_MODEL="${MODEL_OVERRIDE:-${GINSU_CLAUDE_MODEL:-sonnet}}"
+OPENCODE_MODEL="${MODEL_OVERRIDE:-${GINSU_OPENCODE_MODEL:-}}"
 EFFORT="${GINSU_EFFORT:-high}"        # low|medium|high|xhigh|max (ultra = token footgun, never default)
 SANDBOX="${GINSU_SANDBOX:-write}"     # write (workspace-write, default) | bypass (full access) | read (read-only)
 CLAUDE_WRITE_MODE="${GINSU_CLAUDE_PERMISSION_MODE:-acceptEdits}"
@@ -54,12 +56,20 @@ esac
 
 w_dir(){ echo "$ROOT/$1"; }
 die(){ echo "ginsu: $*" >&2; exit 1; }
-valid_engine(){ [ "$1" = codex ] || [ "$1" = claude ]; }
-model_for(){ if [ "$1" = claude ]; then echo "$CLAUDE_MODEL"; else echo "$CODEX_MODEL"; fi; }
+valid_engine(){ [ "$1" = codex ] || [ "$1" = claude ] || [ "$1" = opencode ]; }
+model_for(){ case "$1" in claude) echo "$CLAUDE_MODEL";; opencode) echo "$OPENCODE_MODEL";; *) echo "$CODEX_MODEL";; esac; }
 engine_for(){ cat "$1/engine" 2>/dev/null || echo codex; }
 error_file(){ local e; e="$(engine_for "$1")"; echo "$1/$e.err"; }
 security_label(){
   if [ "$1" = codex ]; then echo "sandbox $SANDBOX"; return; fi
+  if [ "$1" = opencode ]; then
+    case "$SANDBOX" in
+      read) echo "OpenCode plan agent, edit/bash/external-directory denied (not an OS sandbox)";;
+      write) echo "OpenCode build agent permissions (not an OS sandbox)";;
+      bypass) echo "OpenCode auto-approved permissions (not an OS sandbox)";;
+    esac
+    return
+  fi
   case "$SANDBOX" in
     read) echo "Claude permission mode plan (not an OS sandbox)";;
     write) echo "Claude permission mode $CLAUDE_WRITE_MODE (not an OS sandbox)";;
@@ -150,7 +160,7 @@ sidfile = sys.argv[1] if len(sys.argv) > 1 else ""
 repo    = sys.argv[2] if len(sys.argv) > 2 else ""
 engine  = sys.argv[3] if len(sys.argv) > 3 else "codex"
 outfile = sys.argv[4] if len(sys.argv) > 4 else ""
-label   = "Claude" if engine == "claude" else "Codex"
+label   = {"claude":"Claude", "opencode":"OpenCode"}.get(engine, "Codex")
 
 NOCOLOR = bool(os.environ.get("NO_COLOR"))
 def c(code): return "" if NOCOLOR else code
@@ -160,7 +170,7 @@ GREY=c("\033[38;5;245m"); DK=c("\033[38;5;240m"); LT=c("\033[38;5;250m")
 RED=c("\033[38;5;203m"); YEL=c("\033[38;5;179m")
 
 SPIN="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-start=time.time(); si=0; usage=None; seen=set(); stream_failed=False; failure_message=""
+start=time.time(); si=0; usage=None; seen=set(); stream_failed=False; failure_message=""; reply_parts=[]
 
 def width():
     try: return shutil.get_terminal_size((80,24)).columns
@@ -303,8 +313,30 @@ def render_claude(o):
                 for line in shown: out("%s  %s%s" % (DIM,line[:width()-2],RESET))
                 if len(lines)>len(shown): out("%s  … (+%d lines)%s" % (DIM,len(lines)-len(shown),RESET))
 
+def render_opencode(o):
+    global usage, stream_failed, failure_message
+    save_session(o.get("sessionID"))
+    t=o.get("type"); part=o.get("part") or {}
+    if t=="text":
+        txt=(part.get("text") or "").strip()
+        if txt:
+            reply_parts.append(txt)
+            write_reply("\n\n".join(reply_parts))
+            out(); out("%s%s❯ OpenCode%s" % (B,CYAN,RESET)); out("%s%s%s" % (LT,wrap(txt),RESET))
+    elif t=="tool_use":
+        name=part.get("tool") or part.get("type") or "tool"
+        out("%s· %s%s" % (DIM,name,RESET))
+    elif t=="step_finish":
+        usage=part.get("tokens") or usage
+    elif t=="error":
+        err=o.get("error") or part.get("error") or o
+        failure_message=compact_input(err)
+        stream_failed=True
+        out("%s! %s%s" % (RED,failure_message[:500],RESET))
+
 def render(o):
     if engine == "claude": render_claude(o)
+    elif engine == "opencode": render_opencode(o)
     else: render_codex(o)
 
 def footer():
@@ -390,21 +422,22 @@ spawn)
   if [ "$depth" -gt 0 ] && [ "${GINSU_ALLOW_NESTED:-0}" != 1 ]; then
     die "nested workers are disabled (already at depth $depth); set GINSU_ALLOW_NESTED=1 only when the user explicitly wants another layer"
   fi
-  worker="${1:?usage: ginsu spawn <worker> <repo> [--engine codex|claude] [--effort E] [--model M]}"; repo_arg="${2:?need repo path}"; shift 2
+  worker="${1:?usage: ginsu spawn <worker> <repo> [--engine codex|claude|opencode] [--effort E] [--model M]}"; repo_arg="${2:?need repo path}"; shift 2
   engine="$ENGINE_DEFAULT"; effort_flag=""; model_flag=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --engine|--backend) engine="${2:?$1 needs codex or claude}"; shift;;
+      --engine|--backend) engine="${2:?$1 needs codex, claude, or opencode}"; shift;;
       --effort) effort_flag="${2:?--effort needs a value}"; shift;;
       --model)  model_flag="${2:?--model needs a value}"; shift;;
       *) die "unknown spawn flag '$1'";;
     esac; shift
   done
-  valid_engine "$engine" || die "bad engine '$engine' (use codex|claude)"
+  valid_engine "$engine" || die "bad engine '$engine' (use codex|claude|opencode)"
   valid_worker "$worker" || die "bad worker name '$worker' — letters, digits, '_' and '-' only"
   repo="$(cd "$repo_arg" 2>/dev/null && pwd)" || die "no such repo: $repo_arg"
   # Flags become the worker's persisted defaults; env vars remain the fallback.
   [ -n "$effort_flag" ] && EFFORT="$effort_flag"
+  [ "$engine" = opencode ] && [ -z "$effort_flag" ] && EFFORT=default
   model="${model_flag:-$(model_for "$engine")}"
   PY="$(command -v python3 || command -v python || true)"
   [ -n "$PY" ] || die "ginsu needs python3 (or python) on PATH for the worker window"
@@ -414,19 +447,20 @@ spawn)
   # one worker per repo — refuse to open a second in the same tree (they'd clobber each other)
   for od in "$ROOT"/*/; do [ -d "$od" ] || continue; ow="$(basename "$od")"; [ "$ow" = "$worker" ] && continue
     if worker_alive "$od" && [ "$(cat "$od/repo" 2>/dev/null)" = "$repo" ]; then die "worker '$ow' is already running in $repo — one worker per repo (ginsu stop $ow first)"; fi; done
-  if [ "$engine" = codex ]; then
-    [ -x "$CODEX" ] || command -v "$CODEX" >/dev/null || die "codex CLI not found ($CODEX) — install Codex first"
-  else
-    [ -x "$CLAUDE" ] || command -v "$CLAUDE" >/dev/null || die "claude CLI not found ($CLAUDE) — install Claude Code first"
-    case "$CLAUDE_WRITE_MODE" in acceptEdits|auto|dontAsk) ;; *) die "bad GINSU_CLAUDE_PERMISSION_MODE '$CLAUDE_WRITE_MODE' (use acceptEdits|auto|dontAsk)";; esac
-  fi
+  case "$engine" in
+    codex) [ -x "$CODEX" ] || command -v "$CODEX" >/dev/null || die "codex CLI not found ($CODEX) — install Codex first";;
+    claude)
+      [ -x "$CLAUDE" ] || command -v "$CLAUDE" >/dev/null || die "claude CLI not found ($CLAUDE) — install Claude Code first"
+      case "$CLAUDE_WRITE_MODE" in acceptEdits|auto|dontAsk) ;; *) die "bad GINSU_CLAUDE_PERMISSION_MODE '$CLAUDE_WRITE_MODE' (use acceptEdits|auto|dontAsk)";; esac;;
+    opencode) [ -x "$OPENCODE" ] || command -v "$OPENCODE" >/dev/null || die "opencode CLI not found ($OPENCODE) — install OpenCode first";;
+  esac
   mkdir -p "$d"; rm -rf "$d/queue" "$d/meta" "$d/done" "$d/lock"
-  rm -f "$d/inbox" "$d/session.id" "$d/response.out" "$d/codex.err" "$d/claude.err"
+  rm -f "$d/inbox" "$d/session.id" "$d/response.out" "$d/codex.err" "$d/claude.err" "$d/opencode.err"
   mkdir -p "$d/queue" "$d/meta" "$d/done"
   echo 0 > "$d/turn"; echo 0 > "$d/seq"; echo 0 > "$d/last"; rm -f "$d/current"; echo "$repo" > "$d/repo"; echo "$engine" > "$d/engine"
   echo "$model" > "$d/model"; echo "$EFFORT" > "$d/effort"; echo "$SANDBOX" > "$d/sandbox"; echo "$CLAUDE_WRITE_MODE" > "$d/claude.permission"
   echo "$PY" > "$d/python"
-  if [ "$engine" = claude ]; then echo "$CLAUDE" > "$d/cli"; else echo "$CODEX" > "$d/cli"; fi
+  case "$engine" in claude) echo "$CLAUDE" > "$d/cli";; opencode) echo "$OPENCODE" > "$d/cli";; *) echo "$CODEX" > "$d/cli";; esac
   write_renderer "$d/render.py"
   launch_window "$worker" "$d"
   for _ in $(seq 1 40); do
@@ -445,7 +479,11 @@ _loop)  # internal: the worker loop, runs inside the visible terminal
   EFFORT="$(cat "$d/effort" 2>/dev/null || echo "$EFFORT")"
   SANDBOX="$(cat "$d/sandbox" 2>/dev/null || echo "$SANDBOX")"
   CLAUDE_WRITE_MODE="$(cat "$d/claude.permission" 2>/dev/null || echo "$CLAUDE_WRITE_MODE")"
-  if [ "$engine" = claude ]; then CLAUDE="$(cat "$d/cli" 2>/dev/null || echo "$CLAUDE")"; else CODEX="$(cat "$d/cli" 2>/dev/null || echo "$CODEX")"; fi
+  case "$engine" in
+    claude) CLAUDE="$(cat "$d/cli" 2>/dev/null || echo "$CLAUDE")";;
+    opencode) OPENCODE="$(cat "$d/cli" 2>/dev/null || echo "$OPENCODE")";;
+    *) CODEX="$(cat "$d/cli" 2>/dev/null || echo "$CODEX")";;
+  esac
   case "$SANDBOX" in
     bypass) SBX=(--dangerously-bypass-approvals-and-sandbox);;
     write)  SBX=(--sandbox workspace-write);;
@@ -500,7 +538,7 @@ _loop)  # internal: the worker loop, runs inside the visible terminal
         "$CODEX" exec "${base[@]}" -C "$repo" "$prompt" </dev/null 2>>"$d/codex.err" | "$PY" "$d/render.py" "$d/session.id" "$repo" "$engine" "$d/response.out"
         prc=("${PIPESTATUS[@]}"); rc="${prc[0]}"; [ "$rc" != 0 ] || rc="${prc[1]}"
       fi
-    else
+    elif [ "$engine" = claude ]; then
       cbase=(-p --output-format stream-json --verbose --model "$mdl" --effort "$eff")
       case "$SANDBOX" in
         read) cbase+=(--permission-mode plan);;
@@ -513,6 +551,22 @@ _loop)  # internal: the worker loop, runs inside the visible terminal
         cbase+=(--session-id "$("$PY" -c 'import uuid; print(uuid.uuid4())')")
       fi
       "$CLAUDE" "${cbase[@]}" "$prompt" </dev/null 2>>"$d/claude.err" | "$PY" "$d/render.py" "$d/session.id" "$repo" "$engine" "$d/response.out"
+      prc=("${PIPESTATUS[@]}"); rc="${prc[0]}"; [ "$rc" != 0 ] || rc="${prc[1]}"
+    else
+      obase=(run --format json --dir "$repo")
+      [ -n "$mdl" ] && obase+=(--model "$mdl")
+      [ "$eff" != default ] && obase+=(--variant "$eff")
+      [ -s "$d/session.id" ] && obase+=(--session "$(cat "$d/session.id")")
+      case "$SANDBOX" in
+        read)
+          obase+=(--agent plan)
+          # OpenCode's permission gate is a policy, not an OS sandbox. Deny
+          # writes and shell access even if the user's plan agent is customized.
+          OPENCODE_PERMISSION='{"edit":"deny","bash":"deny","external_directory":"deny"}' \
+            "$OPENCODE" "${obase[@]}" "$prompt" </dev/null 2>>"$d/opencode.err" | "$PY" "$d/render.py" "$d/session.id" "$repo" "$engine" "$d/response.out";;
+        write) "$OPENCODE" "${obase[@]}" --agent build "$prompt" </dev/null 2>>"$d/opencode.err" | "$PY" "$d/render.py" "$d/session.id" "$repo" "$engine" "$d/response.out";;
+        bypass) "$OPENCODE" "${obase[@]}" --agent build --auto "$prompt" </dev/null 2>>"$d/opencode.err" | "$PY" "$d/render.py" "$d/session.id" "$repo" "$engine" "$d/response.out";;
+      esac
       prc=("${PIPESTATUS[@]}"); rc="${prc[0]}"; [ "$rc" != 0 ] || rc="${prc[1]}"
     fi
     if [ "$rc" = 0 ]; then
@@ -647,7 +701,7 @@ restart) worker="${1:?usage: ginsu restart <worker>}"; d="$(w_dir "$worker")"; \
         permission="$(cat "$d/claude.permission" 2>/dev/null || echo "$CLAUDE_WRITE_MODE")"; cli="$(cat "$d/cli" 2>/dev/null || true)"; \
         if worker_alive "$d"; then "$SELF" stop "$worker" || die "refusing to restart '$worker': the old worker could not be confirmed stopped"; fi; \
         export GINSU_MODEL="$model" GINSU_EFFORT="$effort" GINSU_SANDBOX="$sandbox" GINSU_CLAUDE_PERMISSION_MODE="$permission"; \
-        if [ "$engine" = claude ]; then export GINSU_CLAUDE="$cli"; else export GINSU_CODEX="$cli"; fi; \
+        case "$engine" in claude) export GINSU_CLAUDE="$cli";; opencode) export GINSU_OPENCODE="$cli";; *) export GINSU_CODEX="$cli";; esac; \
         exec "$SELF" spawn "$worker" "$repo" --engine "$engine";;
 version|-v|--version) echo "ginsu 2.1.1";;
 *) sed -n '2,/^set -uo pipefail$/p' "$0" | sed '$d; s/^# \{0,1\}//';;
