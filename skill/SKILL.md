@@ -1,6 +1,6 @@
 ---
 name: ginsu
-description: Delegate coding work to a visible Codex or Claude Code worker and drive it as a queued, resumable conversation. Use when the user asks one coding agent to spawn or steer the other, when delegating a bounded implementation or audit, or when seeking a cross-model review. Requires the ginsu CLI on PATH (github.com/hurttlocker/ginsu).
+description: Delegate coding work to a visible Codex, Claude Code, or OpenCode worker and drive it as a queued, resumable conversation. Use when delegating a bounded implementation or audit, or when seeking a cross-model review. Requires the ginsu CLI on PATH (github.com/hurttlocker/ginsu).
 ---
 
 # Ginsu — drive the other coding agent
@@ -11,12 +11,13 @@ Use `ginsu` to keep the current agent as orchestrator while a visible worker act
 
 - From Claude Code, omit `--engine` to use the backward-compatible Codex default.
 - From Codex, pass `--engine claude` to open a visible Claude Code worker.
+- Pass `--engine opencode` for an optional OpenCode worker. Use a provider-qualified model such as `openrouter/stealth/space-bunny-alpha` when selecting an OpenRouter model; otherwise OpenCode uses its configured default.
 - Choose a same-model worker only when the user explicitly wants parallel capacity rather than a cross-model check.
 
 ## Run the loop
 
 ```bash
-ginsu spawn <worker> <repo> --engine codex|claude [--effort E] [--model M]   # flags persist as the worker's defaults
+ginsu spawn <worker> <repo> --engine codex|claude|opencode [--effort E] [--model M]   # flags persist as the worker's defaults
 ginsu send <worker> "<bounded prompt>"
 ginsu send <worker> "<follow-up prompt>"
 ginsu send <worker> "<long build task>" --no-wait   # prints the ticket immediately
@@ -45,8 +46,8 @@ Use:
 - Run `ginsu diff` and relevant tests before trusting a completion claim.
 - Keep one active worker per repository to avoid concurrent edits.
 - Keep delegation one level deep. Ginsu refuses nested calls that inherit the worker environment unless the user explicitly authorizes nesting and `GINSU_ALLOW_NESTED=1` is set. Treat this as a workflow guard, not a security boundary.
-- Explain the security model accurately. Codex `write` uses workspace-write sandboxing. Claude `write` maps to `acceptEdits` by default, which is a permission policy, not an operating-system sandbox. Use `read` for Claude plan mode or `bypass` only on a trusted machine and repository.
-- Remember that each backend consumes the user's own Codex or Claude subscription.
+- Explain the security model accurately. Codex `write` uses workspace-write sandboxing. Claude `write` maps to `acceptEdits` by default. OpenCode `write` uses its configured build-agent permissions. Claude and OpenCode permissions are policies, not operating-system sandboxes. OpenCode `read` denies edit, shell, and external-directory access for that worker.
+- Check the selected backend's actual provider billing or subscription before claiming cost savings; model token counts alone do not prove savings.
 
 ## Maintain Ginsu
 

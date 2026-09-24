@@ -9,6 +9,9 @@ CW="codex_$$"
 HW="claude_$$"
 HR="claude_read_$$"
 HB="claude_bypass_$$"
+OW="opencode_$$"
+OR="opencode_read_$$"
+OB="opencode_bypass_$$"
 RW="release_$$"
 
 cleanup() {
@@ -20,6 +23,9 @@ cleanup() {
   tmux kill-session -t "ginsu-$HW" 2>/dev/null || true
   tmux kill-session -t "ginsu-$HR" 2>/dev/null || true
   tmux kill-session -t "ginsu-$HB" 2>/dev/null || true
+  tmux kill-session -t "ginsu-$OW" 2>/dev/null || true
+  tmux kill-session -t "ginsu-$OR" 2>/dev/null || true
+  tmux kill-session -t "ginsu-$OB" 2>/dev/null || true
   tmux kill-session -t "ginsu-$RW" 2>/dev/null || true
   rm -rf "$BASE"
 }
@@ -82,13 +88,39 @@ print(json.dumps({"type":"assistant","session_id":sid,"message":{"id":"m1","cont
 print(json.dumps({"type":"result","subtype":"error" if prompt == "softfail" else "success","is_error":prompt == "softfail","session_id":sid,"result":reply,"usage":{"input_tokens":7,"cache_read_input_tokens":4,"output_tokens":3}}))
 PY
 FAKE_CLAUDE
-chmod +x "$TMP/bin/codex" "$TMP/bin/claude"
+cat > "$TMP/bin/opencode" <<'FAKE_OPENCODE'
+#!/usr/bin/env bash
+set -u
+mode=first; sid=""; prompt="${!#}"
+printf '%s\n' "$*" >> "$(dirname "$0")/opencode.args"
+printf '%s\n' "${OPENCODE_PERMISSION:-}" >> "$(dirname "$0")/opencode.permissions"
+for ((i=1; i<=$#; i++)); do
+  arg="${!i}"
+  if [ "$arg" = --session ]; then mode=resume; j=$((i+1)); sid="${!j}"; fi
+done
+if [ "$prompt" = fail ]; then echo "fake opencode failure" >&2; exit 25; fi
+[ "$prompt" = slow ] && sleep 0.3
+[ -n "$sid" ] || sid=opencode-session
+python3 - "$mode" "$sid" "$prompt" <<'PY'
+import json, sys
+mode, sid, prompt = sys.argv[1:]
+reply = f"opencode:{mode}:{prompt}"
+print(json.dumps({"type":"step_start","sessionID":sid,"part":{"type":"step-start"}}))
+if prompt == "softfail":
+    print(json.dumps({"type":"error","sessionID":sid,"error":{"message":"fake opencode stream error"}}))
+else:
+    print(json.dumps({"type":"text","sessionID":sid,"part":{"type":"text","text":reply}}))
+print(json.dumps({"type":"step_finish","sessionID":sid,"part":{"type":"step-finish","tokens":{"input":7,"output":3}}}))
+PY
+FAKE_OPENCODE
+chmod +x "$TMP/bin/codex" "$TMP/bin/claude" "$TMP/bin/opencode"
 
 COMMON=(
   GINSU_HOME="$TMP/home"
   GINSU_TERM=tmux
   GINSU_CODEX="$TMP/bin/codex"
   GINSU_CLAUDE="$TMP/bin/claude"
+  GINSU_OPENCODE="$TMP/bin/opencode"
   GINSU_TIMEOUT=20
   # Pin every behavior knob: the harness must not inherit the operator's
   # ambient GINSU_* config (a real bypass-user's env broke these tests once).
@@ -220,4 +252,33 @@ env "${COMMON[@]}" "$GINSU" send "$HB" bypassmode >/dev/null
 assert_has "$TMP/bin/claude.args" "--dangerously-skip-permissions"
 env "${COMMON[@]}" "$GINSU" stop "$HB" >/dev/null
 
-echo "PASS: both engines, resume, queue tickets, failures, restart, verified stop, stale-marker release, security mappings, and nesting guard"
+g spawn "$OW" "$TMP/repo" --engine opencode --model openrouter/stealth/space-bunny-alpha >/dev/null
+assert_eq "$(g send "$OW" first)" "opencode:first:first"
+assert_eq "$(g send "$OW" second)" "opencode:resume:second"
+assert_has "$TMP/bin/opencode.args" "run --format json --dir $TMP/repo --model openrouter/stealth/space-bunny-alpha"
+assert_has "$TMP/bin/opencode.args" "--session opencode-session"
+assert_has "$TMP/bin/opencode.args" "--agent build"
+assert_eq "$(cat "$TMP/home/$OW/effort")" default
+if g send "$OW" fail > "$TMP/fail.out" 2>&1; then fail "failed OpenCode turn returned success"; fi
+assert_has "$TMP/fail.out" "opencode turn failed (exit 25)"
+if g send "$OW" softfail > "$TMP/fail.out" 2>&1; then fail "OpenCode stream error returned success"; fi
+assert_has "$TMP/fail.out" "fake opencode stream error"
+assert_eq "$(g send "$OW" recovered --effort high)" "opencode:resume:recovered"
+assert_has "$TMP/bin/opencode.args" "--variant high"
+g restart "$OW" >/dev/null
+assert_eq "$(cat "$TMP/home/$OW/engine")" opencode
+assert_eq "$(g send "$OW" restarted)" "opencode:first:restarted"
+g stop "$OW" >/dev/null
+
+env "${COMMON[@]}" GINSU_SANDBOX=read "$GINSU" spawn "$OR" "$TMP/repo" --engine opencode >/dev/null
+assert_eq "$(g send "$OR" readmode)" "opencode:first:readmode"
+assert_has "$TMP/bin/opencode.args" "--agent plan"
+assert_has "$TMP/bin/opencode.permissions" '"edit":"deny"'
+g stop "$OR" >/dev/null
+
+env "${COMMON[@]}" GINSU_SANDBOX=bypass "$GINSU" spawn "$OB" "$TMP/repo" --engine opencode >/dev/null
+assert_eq "$(g send "$OB" bypassmode)" "opencode:first:bypassmode"
+assert_has "$TMP/bin/opencode.args" "--agent build --auto"
+g stop "$OB" >/dev/null
+
+echo "PASS: three engines, resume, queue tickets, failures, restart, verified stop, stale-marker release, security mappings, and nesting guard"

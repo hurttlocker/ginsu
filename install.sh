@@ -15,8 +15,10 @@ echo "✓ linked ginsu → $target"
 
 command -v codex >/dev/null || echo "  ⚠ Codex CLI not found on PATH — install it: https://github.com/openai/codex"
 command -v claude >/dev/null || echo "  ⚠ Claude Code not found on PATH — needed for --engine claude"
+command -v opencode >/dev/null || echo "  ⚠ OpenCode not found on PATH — needed for --engine opencode"
 command -v python3 >/dev/null || command -v python >/dev/null || echo "  ⚠ python3 not found on PATH — ginsu needs it to render the worker window"
 case ":$PATH:" in *":$(dirname "$target"):"*) ;; *) echo "  ⚠ add $(dirname "$target") to your PATH";; esac
 echo "  Codex worker:  ginsu spawn dev <a-repo>"
 echo "  Claude worker: ginsu spawn dev <a-repo> --engine claude"
+echo "  OpenCode worker: ginsu spawn dev <a-repo> --engine opencode"
 echo "  Then:          ginsu send dev \"say hi\""
