@@ -546,6 +546,7 @@ _loop)  # internal: the worker loop, runs inside the visible terminal
     printf '\033[38;5;250m%s\033[0m\n\n' "$prompt"
     : > "$d/response.out"
     if [ "$engine" = codex ]; then
+      errn="$(wc -l < "$d/codex.err" 2>/dev/null || echo 0)"
       if [ -s "$d/session.id" ]; then
         # Current Codex rejects --sandbox on resume; the initial session keeps
         # its sandbox. Bypass is a distinct resume flag and must stay explicit.
@@ -556,6 +557,20 @@ _loop)  # internal: the worker loop, runs inside the visible terminal
       else
         base=("${SBX[@]}" -m "$mdl" -c "model_reasoning_effort=\"$eff\"" --json -o "$d/response.out")
         "$CODEX" exec "${base[@]}" -C "$repo" "$prompt" </dev/null 2>>"$d/codex.err" | "$PY" "$d/render.py" "$d/session.id" "$repo" "$engine" "$d/response.out"
+        prc=("${PIPESTATUS[@]}"); rc="${prc[0]}"; [ "$rc" != 0 ] || rc="${prc[1]}"
+      fi
+      # Codex can lose a worker's thread mid-session ("thread <id> not found"),
+      # and every later resume then fails. Start a fresh thread and rerun this
+      # ticket once, telling the agent to look for its own partial work first.
+      if [ "$rc" != 0 ] && tail -n "+$((errn+1))" "$d/codex.err" 2>/dev/null | grep -q 'thread .* not found'; then
+        printf '\033[33m  engine lost its thread; retrying this ticket once on a fresh thread\033[0m\n'
+        echo "$(date -u +%FT%TZ) ginsu: thread lost on ticket $t; retrying once on a fresh thread" >> "$d/codex.err"
+        rm -f "$d/session.id"; : > "$d/response.out"
+        retry="Your previous attempt at this task stopped part way because the engine lost its session. Check git status, git log and any files you already wrote in this repository before you start, and continue from that work. The task follows.
+
+$prompt"
+        base=("${SBX[@]}" -m "$mdl" -c "model_reasoning_effort=\"$eff\"" --json -o "$d/response.out")
+        "$CODEX" exec "${base[@]}" -C "$repo" "$retry" </dev/null 2>>"$d/codex.err" | "$PY" "$d/render.py" "$d/session.id" "$repo" "$engine" "$d/response.out"
         prc=("${PIPESTATUS[@]}"); rc="${prc[0]}"; [ "$rc" != 0 ] || rc="${prc[1]}"
       fi
     elif [ "$engine" = claude ]; then
