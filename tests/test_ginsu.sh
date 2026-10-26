@@ -56,6 +56,9 @@ for ((i=1; i<=$#; i++)); do
 done
 if [ "$mode" = resume ] && [ "$has_sandbox" = 1 ]; then echo "resume received unsupported --sandbox" >&2; exit 64; fi
 if [ "$prompt" = fail ]; then echo "fake codex failure" >&2; exit 23; fi
+if [ "$mode" = resume ] && [ "$prompt" = lostthread ]; then
+  echo "ERROR codex_core::session: failed to record rollout items: thread codex-session not found" >&2; exit 1
+fi
 [ "$prompt" = slow ] && sleep 0.3
 # A turn that forks a grandchild and keeps going — the shape of a worker that outlives its wrapper.
 # The grandchild ignores HUP: closing the pane/window must not be what kills it, only stop's tree-kill.
@@ -163,6 +166,11 @@ assert_has "$TMP/fail.out" "codex turn failed (exit 23)"
 if g send "$CW" softfail > "$TMP/fail.out" 2>&1; then fail "Codex stream error returned success"; fi
 assert_has "$TMP/fail.out" "fake codex stream error"
 assert_eq "$(g send "$CW" recovered)" "codex:resume:recovered"
+
+# --- a lost engine thread reruns the ticket once on a fresh thread ---
+lost="$(g send "$CW" lostthread)" || fail "thread-loss retry returned failure: $lost"
+case "$lost" in codex:first:*"stopped part way"*lostthread) ;; *) fail "thread-loss retry did not run on a fresh thread: $lost";; esac
+assert_eq "$(g send "$CW" after-loss)" "codex:resume:after-loss"
 
 # --- async send + idempotent wait ---
 q="$(g send "$CW" async1 --no-wait)"
